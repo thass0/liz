@@ -1,2 +1,4 @@
 /target
 Secrets*.toml
+Cargo.lock
+rust_lisp/
