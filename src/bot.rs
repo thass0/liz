@@ -43,7 +43,7 @@ impl Bot {
             "#,
             thread_id.to_string(),
             session.user_id.to_string(),
-            session.source_code
+            session.source_code.as_ref()
         )
         .execute(&self.db)
         .await?;
@@ -123,8 +123,17 @@ impl EventHandler for Bot {
         if msg.kind == MessageType::Regular && !msg.author.bot {
             let thread_id = msg.channel_id;
             if let Ok(mut session) = self.get_session(thread_id).await {
-                session.append_source(&msg.content);
-                thread_id.say(&ctx.http, session.as_msg()).await.unwrap();
+                session.source_code.append(msg.content);
+                let mut response = session.source_code.to_string();
+
+                // Evaluate once the code is valid.
+                if let Balanced::Yes = session.source_code.balance() {
+                    response.push('\n');
+                    response.push_str(&eval(session.source_code.as_ref()));
+                }
+
+                thread_id.say(&ctx.http, response).await.unwrap();
+
                 self.update_session(thread_id, session).await.unwrap();
             }
         }
@@ -220,27 +229,15 @@ impl EventHandler for Bot {
 #[derive(Debug)]
 struct UserSession {
     user_id:     UserId,
-    source_code: String,
+    source_code: UserCode,
 }
 
 impl UserSession {
     fn new(user_id: UserId, source_code: String) -> Self {
         Self {
             user_id,
-            source_code,
+            source_code: UserCode::new(source_code),
         }
-    }
-
-    fn append_source<S>(&mut self, append: S)
-    where
-        S: AsRef<str>,
-    {
-        self.source_code.push_str("\n");
-        self.source_code.push_str(append.as_ref());
-    }
-
-    fn as_msg(&self) -> String {
-        format!("```lisp\n{}\n```", self.source_code)
     }
 }
 
@@ -264,4 +261,4 @@ use shuttle_runtime::CustomError;
 use sqlx::PgPool;
 use tracing::{error, info};
 
-use crate::eval::eval;
+use crate::eval::{eval, Balanced, UserCode};
