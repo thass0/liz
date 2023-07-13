@@ -1,14 +1,18 @@
 pub struct Bot {
-    _db: PgPool,
+    guild_id: GuildId,
+    _db:      PgPool,
 }
 
 impl Bot {
-    pub async fn new(db: PgPool) -> Result<Self, CustomError> {
+    pub async fn new(
+        db: PgPool,
+        guild_id: GuildId,
+    ) -> Result<Self, CustomError> {
         db.execute(include_str!("../schema.sql"))
             .await
             .map_err(CustomError::new)?;
 
-        Ok(Bot { _db: db })
+        Ok(Bot { _db: db, guild_id })
     }
 }
 
@@ -17,9 +21,8 @@ impl EventHandler for Bot {
     async fn ready(&self, ctx: Context, ready: Ready) {
         info!("{} is connected!", ready.user.name);
 
-        let guild_id = GUILD_ID;
         let commands = GuildId::set_application_commands(
-            &guild_id,
+            &self.guild_id,
             &ctx.http,
             |commands| {
                 commands
@@ -117,8 +120,6 @@ const CMD_EVAL: &str = "eval";
 const CMD_EVAL_SEXPR: &str = "sexpr";
 
 const CMD_SESSION: &str = "session";
-
-const GUILD_ID: GuildId = GuildId(1128676502272229468);
 
 use names::{Generator, Name};
 use serenity::async_trait;
