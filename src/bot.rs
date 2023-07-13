@@ -1,18 +1,88 @@
 pub struct Bot {
     guild_id: GuildId,
-    _db:      PgPool,
+    db:       PgPool,
 }
 
 impl Bot {
-    pub async fn new(
-        db: PgPool,
-        guild_id: GuildId,
-    ) -> Result<Self, CustomError> {
-        db.execute(include_str!("../schema.sql"))
-            .await
-            .map_err(CustomError::new)?;
+    pub fn new(db: PgPool, guild_id: GuildId) -> Result<Self, CustomError> {
+        Ok(Bot { db, guild_id })
+    }
 
-        Ok(Bot { _db: db, guild_id })
+    #[tracing::instrument(name = "Store new session", skip(self))]
+    async fn store_session(
+        &self,
+        thread_id: ChannelId,
+        user_id: UserId,
+    ) -> Result<(), anyhow::Error> {
+        sqlx::query!(
+            r#"
+            INSERT INTO sessions (thread_id, user_id, source_code)
+            VALUES ($1, $2, $3)
+            "#,
+            thread_id.to_string(),
+            user_id.to_string(),
+            String::new(),
+        )
+        .execute(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    #[tracing::instrument(name = "Update existing session", skip(self))]
+    async fn update_session(
+        &self,
+        thread_id: ChannelId,
+        session: UserSession,
+    ) -> Result<(), anyhow::Error> {
+        sqlx::query!(
+            r#"
+            UPDATE sessions SET source_code = $3
+            WHERE
+                thread_id = $1 AND
+                user_id = $2
+            "#,
+            thread_id.to_string(),
+            session.user_id.to_string(),
+            session.source_code
+        )
+        .execute(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    // NOTE: Thread ID and channel ID may be used
+    // interchangeably.
+
+    #[tracing::instrument(name = "Get session by thread ID", skip(self))]
+    async fn get_session(
+        &self,
+        thread_id: ChannelId,
+    ) -> Result<UserSession, anyhow::Error> {
+        struct UserSessionStrings {
+            user_id:     String,
+            source_code: String,
+        }
+        let session = sqlx::query_as!(
+            UserSessionStrings,
+            r#"
+            SELECT user_id, source_code
+            FROM sessions
+            WHERE
+                thread_id = $1
+            "#,
+            thread_id.to_string()
+        )
+        .fetch_one(&self.db)
+        .await?;
+
+        Ok(UserSession::new(
+            session
+                .user_id
+                .parse::<u64>()
+                .map(|id| UserId::from(id))
+                .expect("Invalid data in db"),
+            session.source_code,
+        ))
     }
 }
 
@@ -21,7 +91,7 @@ impl EventHandler for Bot {
     async fn ready(&self, ctx: Context, ready: Ready) {
         info!("{} is connected!", ready.user.name);
 
-        let commands = GuildId::set_application_commands(
+        GuildId::set_application_commands(
             &self.guild_id,
             &ctx.http,
             |commands| {
@@ -47,8 +117,17 @@ impl EventHandler for Bot {
         )
         .await
         .unwrap();
+    }
 
-        info!("{:#?}", commands);
+    async fn message(&self, ctx: Context, msg: Message) {
+        if msg.kind == MessageType::Regular && !msg.author.bot {
+            let thread_id = msg.channel_id;
+            if let Ok(mut session) = self.get_session(thread_id).await {
+                session.append_source(&msg.content);
+                thread_id.say(&ctx.http, session.as_msg()).await.unwrap();
+                self.update_session(thread_id, session).await.unwrap();
+            }
+        }
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
@@ -63,7 +142,7 @@ impl EventHandler for Bot {
                         .cloned();
                     let value = arg.unwrap().value.unwrap();
                     let sexpr_str = value.as_str().unwrap();
-                    eval(sexpr_str)
+                    format!("`{}`\n{}", sexpr_str, eval(sexpr_str))
                 },
                 CMD_SESSION => {
                     let name =
@@ -90,8 +169,30 @@ impl EventHandler for Bot {
                                     error!("Failed to create thread:  {}", why);
                                     "Can't create thread : (".to_owned()
                                 },
-                                Ok(_channel) => {
-                                    "Creating a thread for you :D".to_owned()
+                                Ok(channel) => {
+                                    let store = self.store_session(
+                                        channel.id,
+                                        command.user.id,
+                                    );
+                                    match store.await {
+                                        Ok(()) => "Creating a thread for you \
+                                                   :D"
+                                        .to_owned(),
+                                        Err(_) => {
+                                            let delete_channel = ctx
+                                                .http
+                                                .delete_channel(channel.id.0);
+                                            if delete_channel.await.is_err() {
+                                                "Failed to create valid \
+                                                 session : (. You can remove \
+                                                 the thread."
+                                                    .to_owned()
+                                            } else {
+                                                "Failed to create thread : ("
+                                                    .to_owned()
+                                            }
+                                        },
+                                    }
                                 },
                             }
                         },
@@ -116,6 +217,33 @@ impl EventHandler for Bot {
     }
 }
 
+#[derive(Debug)]
+struct UserSession {
+    user_id:     UserId,
+    source_code: String,
+}
+
+impl UserSession {
+    fn new(user_id: UserId, source_code: String) -> Self {
+        Self {
+            user_id,
+            source_code,
+        }
+    }
+
+    fn append_source<S>(&mut self, append: S)
+    where
+        S: AsRef<str>,
+    {
+        self.source_code.push_str("\n");
+        self.source_code.push_str(append.as_ref());
+    }
+
+    fn as_msg(&self) -> String {
+        format!("```lisp\n{}\n```", self.source_code)
+    }
+}
+
 const CMD_EVAL: &str = "eval";
 const CMD_EVAL_SEXPR: &str = "sexpr";
 
@@ -123,16 +251,17 @@ const CMD_SESSION: &str = "session";
 
 use names::{Generator, Name};
 use serenity::async_trait;
+use serenity::model::application::command::CommandOptionType;
 use serenity::model::application::interaction::{
     Interaction,
     InteractionResponseType,
 };
+use serenity::model::channel::{Message, MessageType};
 use serenity::model::gateway::Ready;
-use serenity::model::prelude::command::CommandOptionType;
-use serenity::model::prelude::GuildId;
+use serenity::model::id::{ChannelId, GuildId, UserId};
 use serenity::prelude::*;
 use shuttle_runtime::CustomError;
-use sqlx::{Executor, PgPool};
+use sqlx::PgPool;
 use tracing::{error, info};
 
 use crate::eval::eval;

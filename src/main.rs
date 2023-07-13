@@ -1,7 +1,10 @@
 #[shuttle_runtime::main]
 async fn serenity(
     #[shuttle_secrets::Secrets] secret_store: SecretStore,
-    #[shuttle_shared_db::Postgres] pool: PgPool,
+    #[shuttle_shared_db::Postgres(local_uri = "postgres://postgres:{secrets.\
+                                               POSTGRES_PASSWORD}@localhost:\
+                                               5432/sessions")]
+    pool: PgPool,
 ) -> shuttle_serenity::ShuttleSerenity {
     // Get the discord token set in `Secrets.toml`
     let token = match secret_store.get("DISCORD_TOKEN") {
@@ -29,7 +32,7 @@ async fn serenity(
     let intents =
         GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
 
-    let bot = match Bot::new(pool, guild_id).await {
+    let bot = match Bot::new(pool, guild_id) {
         Ok(bot) => bot,
         Err(e) => {
             return Err(e.into());
