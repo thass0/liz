@@ -40,6 +40,36 @@ impl UserCode {
         }
     }
 
+    /// Delete lines by index. `0` deletes the last line and
+    /// `1` deletes the line before that etc..
+    pub fn del(&mut self, del_idx: i64) -> Option<String> {
+        let effective_idx;
+        if !del_idx.is_negative() {
+            effective_idx =
+                self.0.lines().count().saturating_sub(del_idx as usize + 1);
+        } else {
+            return None;
+        }
+
+        tracing::info!(effective_idx);
+
+        let mut deleted = None;
+        self.0 = self
+            .0
+            .lines()
+            .enumerate()
+            .filter_map(|(idx, line)| {
+                if idx != effective_idx {
+                    Some(format!("{}\n", line))
+                } else {
+                    deleted = Some(line.to_owned());
+                    None
+                }
+            })
+            .collect::<String>();
+        deleted
+    }
+
     /// Are the parentheses in the source code balanced?
     pub fn balance(&self) -> Balanced {
         let mut n_opened: i32 = 0;

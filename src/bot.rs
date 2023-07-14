@@ -111,7 +111,24 @@ impl EventHandler for Bot {
                     .create_application_command(|command| {
                         command
                             .name(CMD_SESSION)
-                            .description("Enter a Lisp session")
+                            .description("Start a Lisp coding session")
+                    })
+                    .create_application_command(|command| {
+                        command
+                            .name(CMD_DEL)
+                            .description(
+                                "Delete an S-expression in this session",
+                            )
+                            .create_option(|option| {
+                                option
+                                    .name(CMD_DEL_IDX)
+                                    .description(
+                                        "Index of expression to delete (last \
+                                         one starts at index 0)",
+                                    )
+                                    .kind(CommandOptionType::Integer)
+                                    .required(false)
+                            })
                     })
             },
         )
@@ -208,6 +225,43 @@ impl EventHandler for Bot {
                         },
                     }
                 },
+                CMD_DEL => {
+                    let thread_id = command.channel_id;
+                    if let Ok(mut session) = self.get_session(thread_id).await {
+                        if session.user_id == command.user.id {
+                            let default = CommandDataOptionValue::Integer(0);
+                            let del_idx = command
+                                .data
+                                .options
+                                .iter()
+                                .find(|opt| opt.name == CMD_DEL_IDX)
+                                .map_or(default.clone(), |opt| {
+                                    // Get the option's inner value.
+                                    opt.resolved.clone().unwrap_or(
+                                        default,
+                                    )
+                                });
+                            if let CommandDataOptionValue::Integer(idx) = del_idx {
+                                match session.source_code.del(idx) {
+                                    Some(deleted) =>
+                                        match self.update_session(thread_id, session).await {
+                                            Ok(()) => format!("Deleted `{}`", deleted),
+                                            Err(_) => format!("Failed to deleted `{}`", deleted),
+                                        },
+                                    None => "Nothing to delete".to_owned(),
+                                }
+                            } else {
+                                "This commands requires and integer to function.".to_owned()
+                            }
+                        } else {
+                            "Hey! You are not allowed to delete stuff here."
+                                .to_owned()
+                        }
+                    } else {
+                        "You can't deleting things outside of a session thread."
+                            .to_owned()
+                    }
+                },
                 command => unreachable!("Unknown command: {}", command),
             };
 
@@ -244,8 +298,9 @@ impl UserSession {
 
 const CMD_EVAL: &str = "eval";
 const CMD_EVAL_SEXPR: &str = "sexpr";
-
 const CMD_SESSION: &str = "session";
+const CMD_DEL: &str = "del";
+const CMD_DEL_IDX: &str = "index";
 
 use names::{Generator, Name};
 use serenity::async_trait;
@@ -258,6 +313,7 @@ use serenity::model::channel::{Message, MessageType};
 use serenity::model::gateway::Ready;
 use serenity::model::id::{ChannelId, GuildId, UserId};
 use serenity::prelude::*;
+use serenity::model::prelude::prelude::interaction::application_command::CommandDataOptionValue;
 use shuttle_runtime::CustomError;
 use sqlx::PgPool;
 use tracing::{error, info};
