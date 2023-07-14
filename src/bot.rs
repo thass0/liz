@@ -16,11 +16,11 @@ impl Bot {
     ) -> Result<(), anyhow::Error> {
         sqlx::query!(
             r#"
-            INSERT INTO sessions (thread_id, user_id, source_code)
+            INSERT INTO sessions (thread_id, user_ids, source_code)
             VALUES ($1, $2, $3)
             "#,
             thread_id.to_string(),
-            user_id.to_string(),
+            &vec![user_id.to_string()],
             String::new(),
         )
         .execute(&self.db)
@@ -36,18 +36,66 @@ impl Bot {
     ) -> Result<(), anyhow::Error> {
         sqlx::query!(
             r#"
-            UPDATE sessions SET source_code = $3
+            UPDATE sessions
+            SET
+                source_code = $3,
+                user_ids = $2
             WHERE
-                thread_id = $1 AND
-                user_id = $2
+                thread_id = $1
             "#,
             thread_id.to_string(),
-            session.user_id.to_string(),
+            &session
+                .user_ids
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<String>>(),
             session.source_code.as_ref()
         )
         .execute(&self.db)
         .await?;
         Ok(())
+    }
+
+    #[tracing::instrument(
+        name = "Run an updating operation the a session",
+        skip(self, update_callback)
+    )]
+    async fn run_session_update<U>(
+        &self,
+        thread_id: ChannelId,
+        caller: UserId,
+        update_callback: U,
+    ) -> Result<String, OpError>
+    where
+        U: FnOnce(&mut UserSession) -> Result<String, anyhow::Error>,
+    {
+        if let Ok(mut session) = self.get_session(thread_id).await {
+            if session.user_ids.contains(&caller) {
+                match update_callback(&mut session) {
+                    Ok(msg) => {
+                        match self.update_session(thread_id, session).await {
+                            Ok(()) => Ok(msg),
+                            Err(e) => {
+                                error!(
+                                    "Session update failed {}, callback \
+                                     message {}",
+                                    e, msg
+                                );
+                                Err(OpError::Update(e))
+                            },
+                        }
+                    },
+                    Err(e) => {
+                        error!("Operation failed '{}'", e);
+                        Err(e.into())
+                    },
+                }
+            } else {
+                Err(OpError::NotAllowed)
+            }
+        } else {
+            Err(OpError::NotFound(thread_id))
+        }
     }
 
     // NOTE: Thread ID and channel ID may be used
@@ -59,13 +107,13 @@ impl Bot {
         thread_id: ChannelId,
     ) -> Result<UserSession, anyhow::Error> {
         struct UserSessionStrings {
-            user_id:     String,
+            user_ids:    Vec<String>,
             source_code: String,
         }
         let session = sqlx::query_as!(
             UserSessionStrings,
             r#"
-            SELECT user_id, source_code
+            SELECT user_ids, source_code
             FROM sessions
             WHERE
                 thread_id = $1
@@ -77,13 +125,29 @@ impl Bot {
 
         Ok(UserSession::new(
             session
-                .user_id
-                .parse::<u64>()
-                .map(|id| UserId::from(id))
-                .expect("Invalid data in db"),
+                .user_ids
+                .iter()
+                .map(|id| {
+                    id.parse::<u64>()
+                        .map(|id| UserId::from(id))
+                        .expect("Invalid data in db")
+                })
+                .collect::<Vec<UserId>>(),
             session.source_code,
         ))
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum OpError {
+    #[error("Operaton failed, '{0}'")]
+    Callback(#[from] anyhow::Error),
+    #[error("Failed to update session with result")]
+    Update(#[source] anyhow::Error),
+    #[error("No session with thread ID {0}")]
+    NotFound(ChannelId),
+    #[error("Caller was not allowed to work on the session")]
+    NotAllowed,
 }
 
 #[async_trait]
@@ -130,6 +194,22 @@ impl EventHandler for Bot {
                                     .required(false)
                             })
                     })
+                    .create_application_command(|command| {
+                        command
+                            .name(CMD_INVITE)
+                            .description(
+                                "Invite someone to work on a session with you",
+                            )
+                            .create_option(|option| {
+                                option
+                                    .name(CMD_INVITE_WHO)
+                                    .description(
+                                        "The person you want to invite",
+                                    )
+                                    .kind(CommandOptionType::User)
+                                    .required(true)
+                            })
+                    })
             },
         )
         .await
@@ -139,20 +219,40 @@ impl EventHandler for Bot {
     async fn message(&self, ctx: Context, msg: Message) {
         if msg.kind == MessageType::Regular && !msg.author.bot {
             let thread_id = msg.channel_id;
-            if let Ok(mut session) = self.get_session(thread_id).await {
-                session.source_code.append(msg.content);
-                let mut response = session.source_code.to_string();
+            let run_op =
+                self.run_session_update(thread_id, msg.author.id, |session| {
+                    session.source_code.append(msg.content);
+                    let mut response = session.source_code.to_string();
 
-                // Evaluate once the code is valid.
-                if let Balanced::Yes = session.source_code.balance() {
-                    response.push_str("```");
-                    response.push_str(&session.source_code.eval());
-                    response.push_str("\n```");
-                }
+                    // Evaluate once the code is valid.
+                    if let Balanced::Yes = session.source_code.balance() {
+                        response.push_str("```");
+                        response.push_str(&session.source_code.eval());
+                        response.push_str("\n```");
+                    }
 
-                thread_id.say(&ctx.http, response).await.unwrap();
+                    Ok(response)
+                });
 
-                self.update_session(thread_id, session).await.unwrap();
+            let response = match run_op.await {
+                Ok(msg) => msg,
+                Err(op_err) => match op_err {
+                    OpError::Update(_) => "Sorry, I failed to update your \
+                                           code. Maybe try again."
+                        .to_owned(),
+                    OpError::NotAllowed => {
+                        "Hey! You are not allowed edit here.".to_owned()
+                    },
+                    // Don't react to messages in non-session channels.
+                    OpError::NotFound(_) => return,
+                    OpError::Callback(_) => {
+                        unreachable!("Callback doesn't return any errors")
+                    },
+                },
+            };
+
+            if let Err(e) = thread_id.say(&ctx.http, response).await {
+                error!("Failed to respond with new code, {}", e);
             }
         }
     }
@@ -227,8 +327,10 @@ impl EventHandler for Bot {
                 },
                 CMD_DEL => {
                     let thread_id = command.channel_id;
-                    if let Ok(mut session) = self.get_session(thread_id).await {
-                        if session.user_id == command.user.id {
+                    let run_op = self.run_session_update(
+                        thread_id,
+                        command.user.id,
+                        |session| {
                             let default = CommandDataOptionValue::Integer(0);
                             let del_idx = command
                                 .data
@@ -237,29 +339,96 @@ impl EventHandler for Bot {
                                 .find(|opt| opt.name == CMD_DEL_IDX)
                                 .map_or(default.clone(), |opt| {
                                     // Get the option's inner value.
-                                    opt.resolved.clone().unwrap_or(
-                                        default,
-                                    )
+                                    opt.resolved.clone().unwrap_or(default)
                                 });
-                            if let CommandDataOptionValue::Integer(idx) = del_idx {
+                            if let CommandDataOptionValue::Integer(idx) =
+                                del_idx
+                            {
                                 match session.source_code.del(idx) {
-                                    Some(deleted) =>
-                                        match self.update_session(thread_id, session).await {
-                                            Ok(()) => format!("Deleted `{}`", deleted),
-                                            Err(_) => format!("Failed to deleted `{}`", deleted),
-                                        },
-                                    None => "Nothing to delete".to_owned(),
+                                    Some(deleted) => {
+                                        Ok(format!("Deleted `{}`", deleted))
+                                    },
+                                    None => Ok("Nothing to delete".to_owned()),
                                 }
                             } else {
-                                "This commands requires and integer to function.".to_owned()
+                                Ok("This commands requires and integer to \
+                                    function."
+                                    .to_owned())
                             }
-                        } else {
-                            "Hey! You are not allowed to delete stuff here."
-                                .to_owned()
-                        }
-                    } else {
-                        "You can't deleting things outside of a session thread."
-                            .to_owned()
+                        },
+                    );
+
+                    match run_op.await {
+                        Ok(msg) => msg,
+                        Err(op_err) => match op_err {
+                            OpError::Callback(_) => {
+                                INVALID_REQUEST_MSG.to_owned()
+                            },
+                            OpError::NotFound(_) => "You can't deleting \
+                                                     things outside of a \
+                                                     session thread."
+                                .to_owned(),
+                            OpError::Update(_) => {
+                                "Failed to execute deletion".to_owned()
+                            },
+                            OpError::NotAllowed => "Hey! You are not allowed \
+                                                    to delete stuff here."
+                                .to_owned(),
+                        },
+                    }
+                },
+                CMD_INVITE => {
+                    let thread_id = command.channel_id;
+                    let run_op = self.run_session_update(
+                        thread_id,
+                        command.user.id,
+                        |session| {
+                            let other = command
+                                .data
+                                .options
+                                .iter()
+                                .find(|opt| opt.name == CMD_INVITE_WHO)
+                                .cloned();
+                            let other = other
+                                .ok_or(anyhow!("No user other specified"))?
+                                .resolved
+                                .ok_or(anyhow!("No resolved user"))?;
+                            if let CommandDataOptionValue::User(user, member) =
+                                other
+                            {
+                                session.user_ids.push(user.id);
+                                let nickname = member
+                                    .map(|m| m.nick)
+                                    .flatten()
+                                    .unwrap_or(user.name);
+                                Ok(format!(
+                                    "{} is now part of this session",
+                                    nickname
+                                ))
+                            } else {
+                                Ok("This command requires a user to function."
+                                    .to_owned())
+                            }
+                        },
+                    );
+                    match run_op.await {
+                        Ok(msg) => msg,
+                        Err(op_err) => match op_err {
+                            OpError::Callback(_) => {
+                                INVALID_REQUEST_MSG.to_owned()
+                            },
+                            OpError::NotFound(_) => "You can't invite someone \
+                                                     if you aren't in a \
+                                                     session."
+                                .to_owned(),
+                            OpError::Update(_) => {
+                                "Failed to store invite".to_owned()
+                            },
+                            OpError::NotAllowed => "Hey! This is not your own \
+                                                    thread, you can't invite \
+                                                    people."
+                                .to_owned(),
+                        },
                     }
                 },
                 command => unreachable!("Unknown command: {}", command),
@@ -283,14 +452,14 @@ impl EventHandler for Bot {
 
 #[derive(Debug)]
 struct UserSession {
-    user_id:     UserId,
+    user_ids:    Vec<UserId>,
     source_code: UserCode,
 }
 
 impl UserSession {
-    fn new(user_id: UserId, source_code: String) -> Self {
+    fn new(user_ids: Vec<UserId>, source_code: String) -> Self {
         Self {
-            user_id,
+            user_ids,
             source_code: UserCode::new(source_code),
         }
     }
@@ -301,10 +470,18 @@ const CMD_EVAL_SEXPR: &str = "sexpr";
 const CMD_SESSION: &str = "session";
 const CMD_DEL: &str = "del";
 const CMD_DEL_IDX: &str = "index";
+const CMD_INVITE: &str = "invite";
+const CMD_INVITE_WHO: &str = "who";
 
+const INVALID_REQUEST_MSG: &str =
+    "I received an invalid request. Maybe try again.";
+
+use anyhow::anyhow;
 use names::{Generator, Name};
 use serenity::async_trait;
 use serenity::model::application::command::CommandOptionType;
+#[rustfmt::skip]
+use serenity::model::prelude::interaction::application_command::CommandDataOptionValue;
 use serenity::model::application::interaction::{
     Interaction,
     InteractionResponseType,
@@ -313,7 +490,6 @@ use serenity::model::channel::{Message, MessageType};
 use serenity::model::gateway::Ready;
 use serenity::model::id::{ChannelId, GuildId, UserId};
 use serenity::prelude::*;
-use serenity::model::prelude::prelude::interaction::application_command::CommandDataOptionValue;
 use shuttle_runtime::CustomError;
 use sqlx::PgPool;
 use tracing::{error, info};

@@ -51,8 +51,6 @@ impl UserCode {
             return None;
         }
 
-        tracing::info!(effective_idx);
-
         let mut deleted = None;
         self.0 = self
             .0
