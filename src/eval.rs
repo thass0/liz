@@ -74,6 +74,16 @@ impl UserCode {
             .unwrap_or(s);
         s.trim()
     }
+
+    pub fn eval(&self) -> String {
+        let mut env = LisEnv::new();
+        for sexpr in parse(&self.0) {
+            if let Ok(value) = sexpr {
+                env.eval(&value);
+            }
+        }
+        env.to_string()
+    }
 }
 
 impl std::fmt::Display for UserCode {
@@ -97,7 +107,8 @@ pub enum Balanced {
     NoTrailing(u32),
 }
 
-pub fn eval<S>(src: S) -> String
+/// Evaluate a single S-expression.
+pub fn eval_single<S>(src: S) -> String
 where
     S: AsRef<str>,
 {
@@ -107,11 +118,9 @@ where
         0 => "Missing S-expression".to_owned(),
         1 => match sexprs[0] {
             Ok(ref value) => {
-                let env = LisEnv::new();
-                match env.eval(&value) {
-                    Ok(s) => s,
-                    Err(e) => e.to_string(),
-                }
+                let mut env = LisEnv::new();
+                env.eval(&value);
+                env.to_string()
             },
             Err(ref parse_err) => {
                 format!("Invalid S-expression, {}", parse_err)
@@ -125,7 +134,8 @@ where
 
 struct LisEnv {
     env:     Rc<RefCell<Env>>,
-    out_buf: Rc<RefCell<String>>,
+    output:  Rc<RefCell<String>>,
+    results: Vec<(Result<Value, RuntimeError>, String)>,
 }
 
 impl LisEnv {
@@ -138,13 +148,13 @@ impl LisEnv {
         let print = Symbol::from("print");
         env.undefine(&print);
 
-        let out_buf = Rc::new(RefCell::new(String::new()));
-        let out_buf_ref = out_buf.clone();
+        let output = Rc::new(RefCell::new(String::new()));
+        let out_buf_ref = output.clone();
         let print_clo = Rc::new(RefCell::new(
             move |_env: Rc<RefCell<Env>>, args: Vec<Value>| {
                 let expr = require_arg("print", &args, 0)?;
-                let out_buf: &mut String = &mut out_buf_ref.borrow_mut();
-                let res = write!(out_buf, "{}\n", &expr);
+                let buf = &mut out_buf_ref.borrow_mut();
+                let res = write!(buf, "{}\n", &expr);
                 match res {
                     Ok(()) => Ok(expr.clone()),
                     Err(_) => Err(RuntimeError {
@@ -157,16 +167,43 @@ impl LisEnv {
 
         LisEnv {
             env: Rc::new(RefCell::new(env)),
-            out_buf,
+            output,
+            results: Vec::new(),
         }
     }
 
-    fn eval(&self, sexpr: &Value) -> Result<String, RuntimeError> {
-        interpreter::eval(self.env.clone(), sexpr).map(|value| {
-            // Preped the print output of the S-expression to its
-            // return value.
-            format!("{}{}", self.out_buf.borrow(), value.to_string())
-        })
+    fn eval(&mut self, sexpr: &Value) {
+        let eval_res = interpreter::eval(self.env.clone(), sexpr);
+        self.results.push((eval_res, self.output.borrow().clone()));
+        self.output.borrow_mut().clear();
+    }
+}
+
+impl std::fmt::Display for LisEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        for (value, printed) in self.results.iter() {
+            if !printed.is_empty() {
+                write!(f, "{}\n", printed)?;
+            }
+            match value {
+                Ok(value) => {
+                    let value = value.to_string();
+                    if value.len() > 64 {
+                        write!(
+                            f,
+                            "{}...{}",
+                            &value[..32],
+                            &value[(value.len() - 29)..]
+                        )?;
+                    } else {
+                        write!(f, "{}", value)?;
+                    }
+                },
+                Err(why) => write!(f, "{}", why)?,
+            }
+            write!(f, "\n")?;
+        }
+        Ok(())
     }
 }
 

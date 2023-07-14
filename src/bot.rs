@@ -128,8 +128,9 @@ impl EventHandler for Bot {
 
                 // Evaluate once the code is valid.
                 if let Balanced::Yes = session.source_code.balance() {
-                    response.push('\n');
-                    response.push_str(&eval(session.source_code.as_ref()));
+                    response.push_str("```");
+                    response.push_str(&session.source_code.eval());
+                    response.push_str("\n```");
                 }
 
                 thread_id.say(&ctx.http, response).await.unwrap();
@@ -151,7 +152,7 @@ impl EventHandler for Bot {
                         .cloned();
                     let value = arg.unwrap().value.unwrap();
                     let sexpr_str = value.as_str().unwrap();
-                    format!("`{}`\n{}", sexpr_str, eval(sexpr_str))
+                    format!("`{}`\n{}", sexpr_str, eval_single(sexpr_str))
                 },
                 CMD_SESSION => {
                     let name =
@@ -261,4 +262,4 @@ use shuttle_runtime::CustomError;
 use sqlx::PgPool;
 use tracing::{error, info};
 
-use crate::eval::{eval, Balanced, UserCode};
+use crate::eval::{eval_single, Balanced, UserCode};
