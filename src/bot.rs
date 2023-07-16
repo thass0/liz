@@ -1,6 +1,6 @@
 pub struct Bot {
     guild_id: GuildId,
-    db:       PgPool,
+    db: PgPool,
 }
 
 impl Bot {
@@ -107,7 +107,7 @@ impl Bot {
         thread_id: ChannelId,
     ) -> Result<UserSession, anyhow::Error> {
         struct UserSessionStrings {
-            user_ids:    Vec<String>,
+            user_ids: Vec<String>,
             source_code: String,
         }
         let session = sqlx::query_as!(
@@ -135,6 +135,57 @@ impl Bot {
                 .collect::<Vec<UserId>>(),
             session.source_code,
         ))
+    }
+
+    async fn create_session_thread(
+        &self,
+        ctx: &Context,
+        orig_channel: ChannelId,
+        user_id: UserId,
+    ) -> String {
+        // Generate a random two-word name.
+        let name = Generator::with_naming(Name::Plain).next().unwrap();
+
+        let create_thread = orig_channel
+            .create_private_thread(&ctx.http, |thread| thread.name(&name));
+        let thread = match create_thread.await {
+            Err(err) => {
+                error!("Failed to create thread: {}", err);
+                return "Can't start new session :(".to_owned();
+            },
+            Ok(thread) => thread,
+        };
+
+        let rollback_thread_creation = || async move {
+            let delete_thread = ctx.http.delete_channel(thread.id.0);
+            if let Err(err) = delete_thread.await {
+                error!(
+                    "Failed to cleanup failed session creation {}: {}",
+                    thread.id, err
+                );
+            }
+            "Failed to create session :(".to_owned()
+        };
+
+        let send_message = thread.send_message(&ctx.http, |message| {
+            message.content(format!(
+                "Here you go {}, let's code!",
+                user_id.mention()
+            ))
+        });
+        if let Err(err) = send_message.await {
+            error!("Failed to send initial message to thread: {}", err);
+            return rollback_thread_creation().await;
+        }
+
+        let store = self.store_session(thread.id, user_id);
+        match store.await {
+            Err(err) => {
+                error!("Failed to store session: {}", err);
+                return rollback_thread_creation().await;
+            },
+            Ok(()) => "Started a new session for you : D".to_owned(),
+        }
     }
 }
 
@@ -221,7 +272,7 @@ impl EventHandler for Bot {
             let thread_id = msg.channel_id;
             let run_op =
                 self.run_session_update(thread_id, msg.author.id, |session| {
-                    session.source_code.append(msg.content);
+                    session.source_code.append(&msg.content);
                     let mut response = session.source_code.to_string();
 
                     // Evaluate once the code is valid.
@@ -241,7 +292,10 @@ impl EventHandler for Bot {
                                            code. Maybe try again."
                         .to_owned(),
                     OpError::NotAllowed => {
-                        "Hey! You are not allowed edit here.".to_owned()
+                        format!(
+                            "Hey {}! You are not allowed edit here.",
+                            msg.author.id.mention()
+                        )
                     },
                     // Don't react to messages in non-session channels.
                     OpError::NotFound(_) => return,
@@ -272,58 +326,12 @@ impl EventHandler for Bot {
                     format!("`{}`\n{}", sexpr_str, eval_single(sexpr_str))
                 },
                 CMD_SESSION => {
-                    let name =
-                        Generator::with_naming(Name::Plain).next().unwrap();
-                    let send_followup =
-                        command.channel_id.say(&ctx.http, "Yay, let's code");
-                    match send_followup.await {
-                        Err(why) => {
-                            error!(
-                                "Failed to send thread follow-up message: {}",
-                                why
-                            );
-                            "Can't create thread : (".to_owned()
-                        },
-                        Ok(follow_up) => {
-                            let create_thread =
-                                command.channel_id.create_public_thread(
-                                    &ctx.http,
-                                    follow_up.id,
-                                    |thread| thread.name(&name),
-                                );
-                            match create_thread.await {
-                                Err(why) => {
-                                    error!("Failed to create thread:  {}", why);
-                                    "Can't create thread : (".to_owned()
-                                },
-                                Ok(channel) => {
-                                    let store = self.store_session(
-                                        channel.id,
-                                        command.user.id,
-                                    );
-                                    match store.await {
-                                        Ok(()) => "Creating a thread for you \
-                                                   :D"
-                                        .to_owned(),
-                                        Err(_) => {
-                                            let delete_channel = ctx
-                                                .http
-                                                .delete_channel(channel.id.0);
-                                            if delete_channel.await.is_err() {
-                                                "Failed to create valid \
-                                                 session : (. You can remove \
-                                                 the thread."
-                                                    .to_owned()
-                                            } else {
-                                                "Failed to create thread : ("
-                                                    .to_owned()
-                                            }
-                                        },
-                                    }
-                                },
-                            }
-                        },
-                    }
+                    self.create_session_thread(
+                        &ctx,
+                        command.channel_id,
+                        command.user.id,
+                    )
+                    .await
                 },
                 CMD_DEL => {
                     let thread_id = command.channel_id;
@@ -371,9 +379,12 @@ impl EventHandler for Bot {
                             OpError::Update(_) => {
                                 "Failed to execute deletion".to_owned()
                             },
-                            OpError::NotAllowed => "Hey! You are not allowed \
-                                                    to delete stuff here."
-                                .to_owned(),
+                            OpError::NotAllowed => format!(
+                                "Hey {}! You are not allowed \
+                                                    to delete stuff here.",
+                                command.user.id.mention()
+                            )
+                            .to_owned(),
                         },
                     }
                 },
@@ -393,17 +404,12 @@ impl EventHandler for Bot {
                                 .ok_or(anyhow!("No user other specified"))?
                                 .resolved
                                 .ok_or(anyhow!("No resolved user"))?;
-                            if let CommandDataOptionValue::User(user, member) =
-                                other
+                            if let CommandDataOptionValue::User(user, _) = other
                             {
                                 session.user_ids.push(user.id);
-                                let nickname = member
-                                    .map(|m| m.nick)
-                                    .flatten()
-                                    .unwrap_or(user.name);
                                 Ok(format!(
                                     "{} is now part of this session",
-                                    nickname
+                                    user.id.mention()
                                 ))
                             } else {
                                 Ok("This command requires a user to function."
@@ -424,10 +430,13 @@ impl EventHandler for Bot {
                             OpError::Update(_) => {
                                 "Failed to store invite".to_owned()
                             },
-                            OpError::NotAllowed => "Hey! This is not your own \
+                            OpError::NotAllowed => format!(
+                                "Hey {}! This is not your own \
                                                     thread, you can't invite \
-                                                    people."
-                                .to_owned(),
+                                                    people.",
+                                command.user.id.mention()
+                            )
+                            .to_owned(),
                         },
                     }
                 },
@@ -452,7 +461,7 @@ impl EventHandler for Bot {
 
 #[derive(Debug)]
 struct UserSession {
-    user_ids:    Vec<UserId>,
+    user_ids: Vec<UserId>,
     source_code: UserCode,
 }
 
@@ -483,8 +492,7 @@ use serenity::model::application::command::CommandOptionType;
 #[rustfmt::skip]
 use serenity::model::prelude::interaction::application_command::CommandDataOptionValue;
 use serenity::model::application::interaction::{
-    Interaction,
-    InteractionResponseType,
+    Interaction, InteractionResponseType,
 };
 use serenity::model::channel::{Message, MessageType};
 use serenity::model::gateway::Ready;
