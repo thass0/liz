@@ -25,7 +25,7 @@ impl UserCode {
                 match c {
                     ')' => self.0.push(')'),
                     _ => {
-                        if self.0.ends_with(')') {
+                        if !self.0.is_empty() && !self.0.ends_with('\n') {
                             self.0.push('\n');
                         }
 
@@ -63,7 +63,7 @@ impl UserCode {
                 if idx != effective_idx {
                     Some(format!("{}\n", line))
                 } else {
-                    deleted = Some(line.to_owned());
+                    deleted = Some(line.trim().to_owned());
                     None
                 }
             })
@@ -89,10 +89,10 @@ impl UserCode {
     }
 
     fn eval(&self) -> String {
-        let mut env = LisEnv::new();
+        let mut env = LisbEnv::new();
         for sexpr in parse(&self.0) {
             if let Ok(value) = sexpr {
-                env.eval(&value);
+                env.eval(value);
             }
         }
         env.to_string()
@@ -153,13 +153,13 @@ pub trait DiscordCode: AsRef<str> {
 
 impl<T> DiscordCode for T where T: AsRef<str> {}
 
-struct LisEnv {
+struct LisbEnv {
     env: Rc<RefCell<Env>>,
-    output: Rc<RefCell<String>>,
-    results: Vec<(Result<Value, RuntimeError>, String)>,
+    print_buf: Rc<RefCell<String>>,
+    expressions: Vec<LisbExpression>,
 }
 
-impl LisEnv {
+impl LisbEnv {
     fn new() -> Self {
         let mut env = default_env();
 
@@ -169,12 +169,12 @@ impl LisEnv {
         let print = Symbol::from("print");
         env.undefine(&print);
 
-        let output = Rc::new(RefCell::new(String::new()));
-        let out_buf_ref = output.clone();
+        let print_buf = Rc::new(RefCell::new(String::new()));
+        let print_buf_ref = print_buf.clone();
         let print_clo = Rc::new(RefCell::new(
             move |_env: Rc<RefCell<Env>>, args: Vec<Value>| {
                 let expr = require_arg("print", &args, 0)?;
-                let buf = &mut out_buf_ref.borrow_mut();
+                let buf = &mut print_buf_ref.borrow_mut();
                 let res = write!(buf, "{}\n", &expr);
                 match res {
                     Ok(()) => Ok(expr.clone()),
@@ -186,46 +186,79 @@ impl LisEnv {
         ));
         env.define(print, Value::NativeClosure(print_clo));
 
-        LisEnv {
+        LisbEnv {
             env: Rc::new(RefCell::new(env)),
-            output,
-            results: Vec::new(),
+            print_buf,
+            expressions: Vec::new(),
         }
     }
 
-    fn eval(&mut self, sexpr: &Value) {
-        let eval_res = interpreter::eval(self.env.clone(), sexpr);
-        self.results.push((eval_res, self.output.borrow().clone()));
-        self.output.borrow_mut().clear();
+    fn eval(&mut self, sexpr: Value) {
+        let eval_res = interpreter::eval(self.env.clone(), &sexpr);
+        self.expressions.push(LisbExpression {
+            sexpr,
+            result: eval_res,
+            printed: self.print_buf.borrow().clone(),
+        });
+        self.print_buf.borrow_mut().clear();
     }
 }
 
-impl std::fmt::Display for LisEnv {
+impl std::fmt::Display for LisbEnv {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        for (value, printed) in self.results.iter() {
+        for LisbExpression {
+            sexpr,
+            result,
+            printed,
+        } in self.expressions.iter()
+        {
+            write!(f, ";; {}\n", sexpr.to_string().truncate_at(16))?;
+
             if !printed.is_empty() {
                 write!(f, "{}\n", printed)?;
             }
-            match value {
+
+            match result {
                 Ok(value) => {
-                    let value = value.to_string();
-                    if value.len() > 64 {
-                        write!(
-                            f,
-                            "{}...{}",
-                            &value[..32],
-                            &value[(value.len() - 29)..]
-                        )?;
-                    } else {
-                        write!(f, "{}", value)?;
-                    }
+                    let mut value = value.to_string();
+                    write!(f, "{}", value.truncate_at(64))?;
                 },
-                Err(why) => write!(f, "{}", why)?,
+                Err(err) => write!(f, "{}", err)?,
             }
             write!(f, "\n")?;
         }
         Ok(())
     }
+}
+
+/// Truncate the middle of a string once it
+/// exceeds the given length. Insert dots to
+/// indidcate what's missing.
+trait Truncate {
+    fn truncate_at(&mut self, limit: usize) -> &Self;
+}
+
+impl Truncate for String {
+    fn truncate_at(&mut self, limit: usize) -> &Self {
+        if self.len() > limit {
+            let rem = limit % 2;
+            let n_init = (limit + rem) / 2;
+            // `- 3` accounts for the three dots.
+            let n_end = (limit - rem) / 2 - 3;
+            *self = format!(
+                "{}...{}",
+                &self[..n_init],
+                &self[self.len() - n_end..]
+            );
+        }
+        self
+    }
+}
+
+struct LisbExpression {
+    sexpr: Value,
+    result: Result<Value, RuntimeError>,
+    printed: String,
 }
 
 use std::cell::RefCell;

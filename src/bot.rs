@@ -302,9 +302,9 @@ impl EventHandler for Bot {
                                 option
                                     .name(CMD_COLLAB_WHO)
                                     .description(
-                                        "The person you want to invite",
+                                        "The person or role you want to invite",
                                     )
-                                    .kind(CommandOptionType::User)
+                                    .kind(CommandOptionType::Mentionable)
                                     .required(true)
                             })
                     })
