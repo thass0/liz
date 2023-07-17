@@ -294,13 +294,13 @@ impl EventHandler for Bot {
                     })
                     .create_application_command(|command| {
                         command
-                            .name(CMD_INVITE)
+                            .name(CMD_COLLAB)
                             .description(
-                                "Invite someone to work on a session with you",
+                                "Invite someone to collaborate on a session with you",
                             )
                             .create_option(|option| {
                                 option
-                                    .name(CMD_INVITE_WHO)
+                                    .name(CMD_COLLAB_WHO)
                                     .description(
                                         "The person you want to invite",
                                     )
@@ -440,7 +440,7 @@ impl EventHandler for Bot {
                         },
                     }
                 },
-                CMD_INVITE => {
+                CMD_COLLAB => {
                     let thread_id = command.channel_id;
                     let run_op = self.run_session_update(
                         thread_id,
@@ -450,7 +450,7 @@ impl EventHandler for Bot {
                                 .data
                                 .options
                                 .iter()
-                                .find(|opt| opt.name == CMD_INVITE_WHO)
+                                .find(|opt| opt.name == CMD_COLLAB_WHO)
                                 .cloned();
                             let other = other
                                 .ok_or(anyhow!("No user other specified"))?
@@ -481,16 +481,16 @@ impl EventHandler for Bot {
                             OpError::Callback(_) => {
                                 INVALID_REQUEST_MSG.to_owned()
                             },
-                            OpError::NotFound(_) => "You can't invite someone \
-                                                     if you aren't in a \
-                                                     session."
-                                .to_owned(),
+                            OpError::NotFound(_) => {
+                                "You can't collaborate outside of a session."
+                                    .to_owned()
+                            },
                             OpError::Update(_) => {
-                                "Failed to store invite".to_owned()
+                                "Failed to create invite".to_owned()
                             },
                             OpError::NotAllowed => format!(
                                 "Hey {}! This is not your own \
-                                                    thread, you can't invite \
+                                                    session, you can't invite \
                                                     people.",
                                 command.user.id.mention()
                             )
@@ -534,11 +534,11 @@ impl UserSession {
 
 const CMD_EVAL: &str = "eval";
 const CMD_EVAL_SEXPR: &str = "sexpr";
-const CMD_SESSION: &str = "session";
+const CMD_SESSION: &str = "lisp";
 const CMD_DEL: &str = "del";
 const CMD_DEL_IDX: &str = "index";
-const CMD_INVITE: &str = "invite";
-const CMD_INVITE_WHO: &str = "who";
+const CMD_COLLAB: &str = "collab";
+const CMD_COLLAB_WHO: &str = "who";
 
 const INVALID_REQUEST_MSG: &str =
     "I received an invalid request. Maybe try again.";
