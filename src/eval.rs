@@ -25,7 +25,10 @@ impl UserCode {
                 match c {
                     ')' => self.0.push(')'),
                     _ => {
-                        self.0.push('\n');
+                        if self.0.ends_with(')') {
+                            self.0.push('\n');
+                        }
+
                         // This hacky way of adding tabs seems to be a good
                         // heuristic for making the code look decent while
                         // begin fast.

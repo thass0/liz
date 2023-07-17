@@ -28,28 +28,47 @@ impl Bot {
         Ok(())
     }
 
-    #[tracing::instrument(name = "Update existing session", skip(self), err)]
-    async fn update_session(
+    #[tracing::instrument(name = "Update session code", skip(self), err)]
+    async fn update_session_code(
         &self,
         thread_id: ChannelId,
-        session: UserSession,
+        code: UserCode,
     ) -> Result<(), anyhow::Error> {
         sqlx::query!(
             r#"
             UPDATE sessions
             SET
-                source_code = $3,
+                source_code = $2
+            WHERE
+                thread_id = $1
+            "#,
+            thread_id.to_string(),
+            code.as_ref()
+        )
+        .execute(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    #[tracing::instrument(name = "Update session users", skip(self), err)]
+    async fn update_session_users(
+        &self,
+        thread_id: ChannelId,
+        user_ids: Vec<UserId>,
+    ) -> Result<(), anyhow::Error> {
+        sqlx::query!(
+            r#"
+            UPDATE sessions
+            SET
                 user_ids = $2
             WHERE
                 thread_id = $1
             "#,
             thread_id.to_string(),
-            &session
-                .user_ids
+            &user_ids
                 .iter()
                 .map(|id| id.to_string())
                 .collect::<Vec<String>>(),
-            session.source_code.as_ref()
         )
         .execute(&self.db)
         .await?;
@@ -58,33 +77,34 @@ impl Bot {
 
     #[tracing::instrument(
         name = "Run an updating operation the a session",
-        skip(self, update_callback),
+        skip(self, transform, update),
         err
     )]
-    async fn run_session_update<U>(
+    async fn run_session_update<S, U, Fut>(
         &self,
         thread_id: ChannelId,
         caller: UserId,
-        update_callback: U,
+        transform: S,
+        update: U,
     ) -> Result<String, OpError>
     where
-        U: FnOnce(&mut UserSession) -> Result<String, anyhow::Error>,
+        S: FnOnce(&mut UserSession) -> Result<String, anyhow::Error>,
+        U: FnOnce(ChannelId, UserSession) -> Fut,
+        Fut: Future<Output = Result<(), anyhow::Error>>,
     {
         if let Ok(mut session) = self.get_session(thread_id).await {
             if session.user_ids.contains(&caller) {
-                match update_callback(&mut session) {
-                    Ok(msg) => {
-                        match self.update_session(thread_id, session).await {
-                            Ok(()) => Ok(msg),
-                            Err(e) => {
-                                error!(
-                                    "Session update failed {}, callback \
+                match transform(&mut session) {
+                    Ok(msg) => match update(thread_id, session).await {
+                        Ok(()) => Ok(msg),
+                        Err(e) => {
+                            error!(
+                                "Session update failed {}, callback \
                                      message {}",
-                                    e, msg
-                                );
-                                Err(OpError::Update(e))
-                            },
-                        }
+                                e, msg
+                            );
+                            Err(OpError::Update(e))
+                        },
                     },
                     Err(e) => {
                         error!("Operation failed '{}'", e);
@@ -297,11 +317,17 @@ impl EventHandler for Bot {
     async fn message(&self, ctx: Context, msg: Message) {
         if msg.kind == MessageType::Regular && !msg.author.bot {
             let thread_id = msg.channel_id;
-            let run_op =
-                self.run_session_update(thread_id, msg.author.id, |session| {
+            let run_op = self.run_session_update(
+                thread_id,
+                msg.author.id,
+                |session| {
                     session.source_code.append(&msg.content);
                     Ok(session.source_code.respond())
-                });
+                },
+                |thread_id, new_session| {
+                    self.update_session_code(thread_id, new_session.source_code)
+                },
+            );
 
             let response = match run_op.await {
                 Ok(msg) => msg,
@@ -384,6 +410,12 @@ impl EventHandler for Bot {
                                     .to_owned())
                             }
                         },
+                        |thread_id, new_session| {
+                            self.update_session_code(
+                                thread_id,
+                                new_session.source_code,
+                            )
+                        },
                     );
 
                     match run_op.await {
@@ -435,6 +467,12 @@ impl EventHandler for Bot {
                                 Ok("This command requires a user to function."
                                     .to_owned())
                             }
+                        },
+                        |thread_id, new_session| {
+                            self.update_session_users(
+                                thread_id,
+                                new_session.user_ids,
+                            )
                         },
                     );
                     match run_op.await {
@@ -504,6 +542,8 @@ const CMD_INVITE_WHO: &str = "who";
 
 const INVALID_REQUEST_MSG: &str =
     "I received an invalid request. Maybe try again.";
+
+use std::future::Future;
 
 use anyhow::anyhow;
 use names::{Generator, Name};
