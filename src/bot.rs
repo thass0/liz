@@ -8,7 +8,7 @@ impl Bot {
         Ok(Bot { db, guild_id })
     }
 
-    #[tracing::instrument(name = "Store new session", skip(self))]
+    #[tracing::instrument(name = "Store new session", skip(self), err)]
     async fn store_session(
         &self,
         thread_id: ChannelId,
@@ -28,7 +28,7 @@ impl Bot {
         Ok(())
     }
 
-    #[tracing::instrument(name = "Update existing session", skip(self))]
+    #[tracing::instrument(name = "Update existing session", skip(self), err)]
     async fn update_session(
         &self,
         thread_id: ChannelId,
@@ -58,7 +58,8 @@ impl Bot {
 
     #[tracing::instrument(
         name = "Run an updating operation the a session",
-        skip(self, update_callback)
+        skip(self, update_callback),
+        err
     )]
     async fn run_session_update<U>(
         &self,
@@ -187,6 +188,32 @@ impl Bot {
             Ok(()) => "Started a new session for you : D".to_owned(),
         }
     }
+
+    async fn eval_user_input(
+        &self,
+        orig_channel: ChannelId,
+        options: &Vec<CommandDataOption>,
+    ) -> anyhow::Result<String> {
+        match self.get_session(orig_channel).await {
+            Err(_) => {
+                // There is no session for this thread, so `/eval`
+                // will try to execute the  given code.
+                let option = options
+                    .iter()
+                    .find(|opt| opt.name == CMD_EVAL_SEXPR)
+                    .cloned()
+                    .ok_or(anyhow!("Failed to find correct option"))?
+                    .value
+                    .ok_or(anyhow!("Missing option content"))?;
+                let input = option
+                    .as_str()
+                    .ok_or(anyhow!("Failed to get inner string"))?;
+                let code = UserCode::new(input);
+                Ok(code.respond())
+            },
+            Ok(session) => Ok(session.source_code.respond()),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -214,13 +241,13 @@ impl EventHandler for Bot {
                     .create_application_command(|command| {
                         command
                             .name(CMD_EVAL)
-                            .description("Evaluate an S-expression")
+                            .description("Evaluate Lisp code")
                             .create_option(|option| {
                                 option
                                     .name(CMD_EVAL_SEXPR)
                                     .description("S-expression to evaluate")
                                     .kind(CommandOptionType::String)
-                                    .required(true)
+                                    .required(false)
                             })
                     })
                     .create_application_command(|command| {
@@ -273,16 +300,7 @@ impl EventHandler for Bot {
             let run_op =
                 self.run_session_update(thread_id, msg.author.id, |session| {
                     session.source_code.append(&msg.content);
-                    let mut response = session.source_code.to_string();
-
-                    // Evaluate once the code is valid.
-                    if let Balanced::Yes = session.source_code.balance() {
-                        response.push_str("```");
-                        response.push_str(&session.source_code.eval());
-                        response.push_str("\n```");
-                    }
-
-                    Ok(response)
+                    Ok(session.source_code.respond())
                 });
 
             let response = match run_op.await {
@@ -315,15 +333,17 @@ impl EventHandler for Bot {
         if let Interaction::ApplicationCommand(command) = interaction {
             let response_content = match command.data.name.as_str() {
                 CMD_EVAL => {
-                    let arg = command
-                        .data
-                        .options
-                        .iter()
-                        .find(|opt| opt.name == CMD_EVAL_SEXPR)
-                        .cloned();
-                    let value = arg.unwrap().value.unwrap();
-                    let sexpr_str = value.as_str().unwrap();
-                    format!("`{}`\n{}", sexpr_str, eval_single(sexpr_str))
+                    let options = &command.data.options;
+                    let eval_input =
+                        self.eval_user_input(command.channel_id, options);
+                    match eval_input.await {
+                        Err(err) => {
+                            error!("Failed to evaluate user input: {}", err);
+                            format!("I need input outside of a session (looking at you {})",
+                            command.user.id.mention())
+                        },
+                        Ok(response) => response,
+                    }
                 },
                 CMD_SESSION => {
                     self.create_session_thread(
@@ -490,7 +510,10 @@ use names::{Generator, Name};
 use serenity::async_trait;
 use serenity::model::application::command::CommandOptionType;
 #[rustfmt::skip]
-use serenity::model::prelude::interaction::application_command::CommandDataOptionValue;
+use serenity::model::prelude::interaction::application_command::{
+    CommandDataOption,
+    CommandDataOptionValue,
+};
 use serenity::model::application::interaction::{
     Interaction, InteractionResponseType,
 };
@@ -502,4 +525,4 @@ use shuttle_runtime::CustomError;
 use sqlx::PgPool;
 use tracing::{error, info};
 
-use crate::eval::{eval_single, Balanced, UserCode};
+use crate::eval::UserCode;

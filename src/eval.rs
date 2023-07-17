@@ -11,14 +11,14 @@ impl UserCode {
 
     pub fn append<S>(&mut self, source: S)
     where
-        S: AsRef<str>,
+        S: DiscordCode,
     {
         let indents = match self.balance() {
             Balanced::NoMissing(n) => n as usize,
             _ => 0,
         };
 
-        let code = Self::extract_code(source.as_ref());
+        let code = source.strip_discord_code();
         for line in code.lines() {
             let mut chars = line.chars();
             while let Some(c) = chars.next() {
@@ -69,7 +69,7 @@ impl UserCode {
     }
 
     /// Are the parentheses in the source code balanced?
-    pub fn balance(&self) -> Balanced {
+    fn balance(&self) -> Balanced {
         let mut n_opened: i32 = 0;
         for c in self.0.chars() {
             match c {
@@ -85,25 +85,7 @@ impl UserCode {
         }
     }
 
-    /// Remove Discord's formatting (i.e. backticks etc.)
-    /// from `formatted` and return  only the source code
-    /// part of the input.
-    fn extract_code<'a>(code: &'a str) -> &'a str {
-        // Strip optional prefixes.
-        let s = code.trim().strip_prefix("```").map_or_else(
-            || code.strip_prefix("`").unwrap_or(code),
-            |s| s.strip_prefix("lisp\n").unwrap_or(s),
-        );
-        // Strip optional postfixes.
-        let s = s
-            .trim()
-            .strip_suffix("```")
-            .or_else(|| s.strip_suffix("`"))
-            .unwrap_or(s);
-        s.trim()
-    }
-
-    pub fn eval(&self) -> String {
+    fn eval(&self) -> String {
         let mut env = LisEnv::new();
         for sexpr in parse(&self.0) {
             if let Ok(value) = sexpr {
@@ -112,13 +94,18 @@ impl UserCode {
         }
         env.to_string()
     }
-}
 
-impl std::fmt::Display for UserCode {
-    /// Add Discord's formatting to theh source
-    /// code to display it nicely.
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "```lisp\n{}\n```", self.0)
+    // Return a response message including both the
+    // current code and the result of evaluating it.
+    pub fn respond(&self) -> String {
+        let mut response = self.as_discord_code();
+
+        // Evaluate once the code is valid.
+        if let Balanced::Yes = self.balance() {
+            response.push_str(&self.eval().as_discord_code());
+        }
+
+        response
     }
 }
 
@@ -135,34 +122,37 @@ pub enum Balanced {
     NoTrailing(u32),
 }
 
-/// Evaluate a single S-expression.
-pub fn eval_single<S>(src: S) -> String
-where
-    S: AsRef<str>,
-{
-    let sexpr_str = src.as_ref();
-    let sexprs: Vec<Result<Value, ParseError>> = parse(sexpr_str).collect();
-    match sexprs.len() {
-        0 => "Missing S-expression".to_owned(),
-        1 => match sexprs[0] {
-            Ok(ref value) => {
-                let mut env = LisEnv::new();
-                env.eval(&value);
-                env.to_string()
-            },
-            Err(ref parse_err) => {
-                format!("Invalid S-expression, {}", parse_err)
-            },
-        },
-        len @ _ => {
-            format!("Wrong number of S-expressions, {}", len)
-        },
+pub trait DiscordCode: AsRef<str> {
+    /// Add Discord's formatting.
+    fn as_discord_code(&self) -> String {
+        format!("```lisp\n{}\n```", self.as_ref())
+    }
+
+    /// Remove Discord's formatting (i.e. backticks etc.)
+    /// from `formatted` and return  only the source code
+    /// part of the input.
+    fn strip_discord_code(&self) -> &str {
+        let code: &str = self.as_ref();
+        // Strip optional prefixes.
+        let s = code.trim().strip_prefix("```").map_or_else(
+            || code.strip_prefix("`").unwrap_or(code),
+            |s| s.strip_prefix("lisp\n").unwrap_or(s),
+        );
+        // Strip optional postfixes.
+        let s = s
+            .trim()
+            .strip_suffix("```")
+            .or_else(|| s.strip_suffix("`"))
+            .unwrap_or(s);
+        s.trim()
     }
 }
 
+impl<T> DiscordCode for T where T: AsRef<str> {}
+
 struct LisEnv {
-    env:     Rc<RefCell<Env>>,
-    output:  Rc<RefCell<String>>,
+    env: Rc<RefCell<Env>>,
+    output: Rc<RefCell<String>>,
     results: Vec<(Result<Value, RuntimeError>, String)>,
 }
 
@@ -240,7 +230,7 @@ use std::fmt::Write;
 use std::rc::Rc;
 
 use rust_lisp::model::{Env, RuntimeError, Symbol, Value};
-use rust_lisp::parser::{parse, ParseError};
+use rust_lisp::parser::parse;
 use rust_lisp::utils::require_arg;
 use rust_lisp::{default_env, interpreter};
 
@@ -251,15 +241,15 @@ mod tests {
     #[test]
     fn extract_code_works() {
         // Any code works here, but I like the word 'blah'.
-        assert_eq!(UserCode::extract_code("`blah`"), "blah");
-        assert_eq!(UserCode::extract_code("`blah"), "blah");
-        assert_eq!(UserCode::extract_code("blah`"), "blah");
-        assert_eq!(UserCode::extract_code("```blah```"), "blah");
-        assert_eq!(UserCode::extract_code("```blah"), "blah");
-        assert_eq!(UserCode::extract_code("blah```"), "blah");
-        assert_eq!(UserCode::extract_code("```lisp\nblah```"), "blah");
-        assert_eq!(UserCode::extract_code("```lisp\nblah"), "blah");
-        assert_eq!(UserCode::extract_code("lisp\nblah```"), "lisp\nblah");
+        assert_eq!("`blah`".strip_discord_code(), "blah");
+        assert_eq!("`blah".strip_discord_code(), "blah");
+        assert_eq!("blah`".strip_discord_code(), "blah");
+        assert_eq!("```blah```".strip_discord_code(), "blah");
+        assert_eq!("```blah".strip_discord_code(), "blah");
+        assert_eq!("blah```".strip_discord_code(), "blah");
+        assert_eq!("```lisp\nblah```".strip_discord_code(), "blah");
+        assert_eq!("```lisp\nblah".strip_discord_code(), "blah");
+        assert_eq!("lisp\nblah```".strip_discord_code(), "lisp\nblah");
     }
 
     #[test]
