@@ -6,7 +6,7 @@ impl UserCode {
     where
         S: AsRef<str>,
     {
-        UserCode(String::from(source.as_ref()))
+        Self(String::from(source.as_ref()))
     }
 
     pub fn append<S>(&mut self, source: S)
@@ -22,22 +22,21 @@ impl UserCode {
         for line in code.lines() {
             let mut chars = line.chars();
             while let Some(c) = chars.next() {
-                match c {
-                    ')' => self.0.push(')'),
-                    _ => {
-                        if !self.0.is_empty() && !self.0.ends_with('\n') {
-                            self.0.push('\n');
-                        }
+                if c == ')' {
+                    self.0.push(')');
+                } else {
+                    if !self.0.is_empty() && !self.0.ends_with('\n') {
+                        self.0.push('\n');
+                    }
 
-                        // This hacky way of adding tabs seems to be a good
-                        // heuristic for making the code look decent while
-                        // begin fast.
-                        self.0.push_str(&"\t".repeat(indents));
+                    // This hacky way of adding tabs seems to be a good
+                    // heuristic for making the code look decent while
+                    // begin fast.
+                    self.0.push_str(&"\t".repeat(indents));
 
-                        self.0.push(c);
-                        self.0.push_str(&chars.collect::<String>());
-                        break;
-                    },
+                    self.0.push(c);
+                    self.0.push_str(&chars.collect::<String>());
+                    break;
                 }
             }
         }
@@ -46,25 +45,28 @@ impl UserCode {
     /// Delete lines by index. `0` deletes the last line and
     /// `1` deletes the line before that etc..
     pub fn del(&mut self, del_idx: i64) -> Option<String> {
-        let effective_idx;
-        if !del_idx.is_negative() {
-            effective_idx =
-                self.0.lines().count().saturating_sub(del_idx as usize + 1);
-        } else {
-            return None;
-        }
+        let del_idx: usize = match del_idx.try_into() {
+            Err(err) => {
+                tracing::error!(
+                    "Discord integer option is invalid index, {err}"
+                );
+                return None;
+            },
+            Ok(i) => i,
+        };
 
+        let effective_idx = self.0.lines().count().saturating_sub(del_idx + 1);
         let mut deleted = None;
         self.0 = self
             .0
             .lines()
             .enumerate()
             .filter_map(|(idx, line)| {
-                if idx != effective_idx {
-                    Some(format!("{}\n", line))
-                } else {
+                if idx == effective_idx {
                     deleted = Some(line.trim().to_owned());
                     None
+                } else {
+                    Some(line.to_string())
                 }
             })
             .collect::<String>();
@@ -83,17 +85,16 @@ impl UserCode {
         }
         match n_opened {
             0 => Balanced::Yes,
-            i32::MIN..=-1 => Balanced::NoTrailing(n_opened.abs() as u32),
+            i32::MIN..=-1 => Balanced::NoTrailing(n_opened.unsigned_abs()),
+            #[allow(clippy::cast_sign_loss)]
             1..=i32::MAX => Balanced::NoMissing(n_opened as u32),
         }
     }
 
     fn eval(&self) -> String {
         let mut env = LisbEnv::new();
-        for sexpr in parse(&self.0) {
-            if let Ok(value) = sexpr {
-                env.eval(value);
-            }
+        for sexpr in parse(&self.0).flatten() {
+            env.eval(sexpr);
         }
         env.to_string()
     }
@@ -104,7 +105,7 @@ impl UserCode {
         let mut response = self.as_discord_code();
 
         // Evaluate once the code is valid.
-        if let Balanced::Yes = self.balance() {
+        if matches!(self.balance(), Balanced::Yes) {
             response.push_str(&self.eval().as_discord_code());
         }
 
@@ -138,14 +139,14 @@ pub trait DiscordCode: AsRef<str> {
         let code: &str = self.as_ref();
         // Strip optional prefixes.
         let s = code.trim().strip_prefix("```").map_or_else(
-            || code.strip_prefix("`").unwrap_or(code),
+            || code.strip_prefix('`').unwrap_or(code),
             |s| s.strip_prefix("lisp\n").unwrap_or(s),
         );
         // Strip optional postfixes.
         let s = s
             .trim()
             .strip_suffix("```")
-            .or_else(|| s.strip_suffix("`"))
+            .or_else(|| s.strip_suffix('`'))
             .unwrap_or(s);
         s.trim()
     }
@@ -175,7 +176,7 @@ impl LisbEnv {
             move |_env: Rc<RefCell<Env>>, args: Vec<Value>| {
                 let expr = require_arg("print", &args, 0)?;
                 let buf = &mut print_buf_ref.borrow_mut();
-                let res = write!(buf, "{}\n", &expr);
+                let res = writeln!(buf, "{}", &expr);
                 match res {
                     Ok(()) => Ok(expr.clone()),
                     Err(_) => Err(RuntimeError {
@@ -186,7 +187,7 @@ impl LisbEnv {
         ));
         env.define(print, Value::NativeClosure(print_clo));
 
-        LisbEnv {
+        Self {
             env: Rc::new(RefCell::new(env)),
             print_buf,
             expressions: Vec::new(),
@@ -210,12 +211,12 @@ impl std::fmt::Display for LisbEnv {
             sexpr,
             result,
             printed,
-        } in self.expressions.iter()
+        } in &self.expressions
         {
-            write!(f, ";; {}\n", sexpr.to_string().truncate_at(16))?;
+            writeln!(f, ";; {}", sexpr.to_string().truncate_at(16))?;
 
             if !printed.is_empty() {
-                write!(f, "{}\n", printed)?;
+                writeln!(f, "{printed}")?;
             }
 
             match result {
@@ -223,9 +224,9 @@ impl std::fmt::Display for LisbEnv {
                     let mut value = value.to_string();
                     write!(f, "{}", value.truncate_at(64))?;
                 },
-                Err(err) => write!(f, "{}", err)?,
+                Err(err) => write!(f, "{err}")?,
             }
-            write!(f, "\n")?;
+            writeln!(f)?;
         }
         Ok(())
     }

@@ -6,55 +6,50 @@ async fn serenity(
                                                5432/sessions")]
     pool: PgPool,
 ) -> shuttle_serenity::ShuttleSerenity {
-    // Get the discord token set in `Secrets.toml`
-    let token = match secret_store.get("DISCORD_TOKEN") {
-        Some(token) => token,
-        None => {
-            return Err(anyhow!("'DISCORD_TOKEN' was not found").into());
-        },
-    };
-    let guild_id = match secret_store.get("DISCORD_GUILDID") {
-        Some(guild_id_str) => match guild_id_str.parse::<u64>() {
-            Ok(guild_id) => GuildId::from(guild_id),
-            Err(e) => {
-                return Err(
-                    anyhow!("'DISCORD_GUILDID' was not valid: {}", e).into()
-                );
-            },
-        },
-        None => {
-            return Err(anyhow!("'DISCORD_GUILDID' was not found").into());
-        },
-    };
+    let (api_token, guild_id) = get_secrets(&secret_store)?;
 
-    // Set gateway intents, which decides what events the bot
-    // will be notified about
     let intents =
         GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
 
-    // Migrate the database.
     sqlx::migrate!("./migrations")
         .run(&pool)
         .await
         .context("Failed to migrate database".to_owned())?;
 
-    let bot = match Bot::new(pool, guild_id) {
-        Ok(bot) => bot,
-        Err(e) => {
-            return Err(e.into());
-        },
-    };
-    let client = Client::builder(&token, intents)
-        .event_handler(bot)
+    let client = Client::builder(&api_token, intents)
+        .event_handler(Bot::new(pool, guild_id))
         .await
-        .expect("Err creating client");
+        .context("Failed to construct client")?;
 
     Ok(client.into())
 }
 
+fn get_secrets(
+    secret_store: &SecretStore,
+) -> anyhow::Result<(String, GuildId)> {
+    let Some(token) = secret_store.get("DISCORD_TOKEN") else {
+        return Err(anyhow!("'DISCORD_TOKEN' was not found"));
+    };
+
+    let guild_id = match secret_store.get("DISCORD_GUILDID") {
+        Some(guild_id_str) => match guild_id_str.parse::<u64>() {
+            Ok(guild_id) => GuildId::from(guild_id),
+            Err(e) => {
+                return Err(anyhow!("'DISCORD_GUILDID' was not valid: {}", e));
+            },
+        },
+        None => {
+            return Err(anyhow!("'DISCORD_GUILDID' was not found"));
+        },
+    };
+
+    Ok((token, guild_id))
+}
+
 use anyhow::{anyhow, Context};
+use serenity::client::Client;
+use serenity::model::gateway::GatewayIntents;
 use serenity::model::id::GuildId;
-use serenity::prelude::*;
 use shuttle_secrets::SecretStore;
 use sqlx::PgPool;
 

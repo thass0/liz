@@ -1,11 +1,11 @@
 pub struct Bot {
-    guild_id: GuildId,
     db: PgPool,
+    guild_id: GuildId,
 }
 
 impl Bot {
-    pub fn new(db: PgPool, guild_id: GuildId) -> Result<Self, CustomError> {
-        Ok(Bot { db, guild_id })
+    pub const fn new(db: PgPool, guild_id: GuildId) -> Self {
+        Self { db, guild_id }
     }
 
     #[tracing::instrument(name = "Store new session", skip(self), err)]
@@ -67,7 +67,7 @@ impl Bot {
             thread_id.to_string(),
             &user_ids
                 .iter()
-                .map(|id| id.to_string())
+                .map(std::string::ToString::to_string)
                 .collect::<Vec<String>>(),
         )
         .execute(&self.db)
@@ -88,9 +88,9 @@ impl Bot {
         update: U,
     ) -> Result<String, OpError>
     where
-        S: FnOnce(&mut UserSession) -> Result<String, anyhow::Error>,
-        U: FnOnce(ChannelId, UserSession) -> Fut,
-        Fut: Future<Output = Result<(), anyhow::Error>>,
+        S: FnOnce(&mut UserSession) -> Result<String, anyhow::Error> + Send,
+        U: FnOnce(ChannelId, UserSession) -> Fut + Send,
+        Fut: Future<Output = Result<(), anyhow::Error>> + Send,
     {
         if let Ok(mut session) = self.get_session(thread_id).await {
             if session.user_ids.contains(&caller) {
@@ -150,7 +150,7 @@ impl Bot {
                 .iter()
                 .map(|id| {
                     id.parse::<u64>()
-                        .map(|id| UserId::from(id))
+                        .map(UserId::from)
                         .expect("Invalid data in db")
                 })
                 .collect::<Vec<UserId>>(),
@@ -158,7 +158,7 @@ impl Bot {
         ))
     }
 
-    async fn create_session_thread(
+    async fn cmd_create_session_thread(
         &self,
         ctx: &Context,
         orig_channel: ChannelId,
@@ -203,16 +203,91 @@ impl Bot {
         match store.await {
             Err(err) => {
                 error!("Failed to store session: {}", err);
-                return rollback_thread_creation().await;
+                rollback_thread_creation().await
             },
             Ok(()) => "Started a new session for you : D".to_owned(),
+        }
+    }
+
+    async fn cmd_del_from_session(
+        &self,
+        thread_id: ChannelId,
+        user_id: UserId,
+        idx: i64,
+    ) -> String {
+        let run_op = self.run_session_update(
+            thread_id,
+            user_id,
+            |session| match session.source_code.del(idx) {
+                Some(deleted) => Ok(format!("Deleted `{deleted}`")),
+                None => Ok("Nothing to delete".to_owned()),
+            },
+            |thread_id, new_session| {
+                self.update_session_code(thread_id, new_session.source_code)
+            },
+        );
+
+        match run_op.await {
+            Ok(msg) => msg,
+            Err(op_err) => match op_err {
+                OpError::Callback(_) => INVALID_REQUEST_MSG.to_owned(),
+                OpError::NotFound(_) => "You can't deleting \
+                                         things outside of a \
+                                         session thread."
+                    .to_owned(),
+                OpError::Update(_) => "Failed to execute deletion".to_owned(),
+                OpError::NotAllowed => format!(
+                    "Hey {}! You are not allowed \
+                                        to delete stuff here.",
+                    user_id.mention()
+                ),
+            },
+        }
+    }
+
+    async fn cmd_invite_collaborator(
+        &self,
+        thread_id: ChannelId,
+        user_id: UserId,
+        invited_id: UserId,
+    ) -> String {
+        let run_op = self.run_session_update(
+            thread_id,
+            user_id,
+            |session| {
+                session.user_ids.push(invited_id);
+                Ok(format!(
+                    "{} is now part of this session",
+                    invited_id.mention()
+                ))
+            },
+            |thread_id, new_session| {
+                self.update_session_users(thread_id, new_session.user_ids)
+            },
+        );
+
+        match run_op.await {
+            Ok(msg) => msg,
+            Err(op_err) => match op_err {
+                OpError::Callback(_) => INVALID_REQUEST_MSG.to_owned(),
+                OpError::NotFound(_) => {
+                    "You can't collaborate outside of a session.".to_owned()
+                },
+                OpError::Update(_) => "Failed to create invite".to_owned(),
+                OpError::NotAllowed => format!(
+                    "Hey {}! This is not your own \
+                    session, you can't invite \
+                    people.",
+                    user_id.mention()
+                ),
+            },
         }
     }
 
     async fn eval_user_input(
         &self,
         orig_channel: ChannelId,
-        options: &Vec<CommandDataOption>,
+        options: &[CommandDataOption],
     ) -> anyhow::Result<String> {
         match self.get_session(orig_channel).await {
             Err(_) => {
@@ -222,12 +297,12 @@ impl Bot {
                     .iter()
                     .find(|opt| opt.name == CMD_EVAL_SEXPR)
                     .cloned()
-                    .ok_or(anyhow!("Failed to find correct option"))?
+                    .ok_or_else(|| anyhow!("Failed to find correct option"))?
                     .value
-                    .ok_or(anyhow!("Missing option content"))?;
+                    .ok_or_else(|| anyhow!("Missing option content"))?;
                 let input = option
                     .as_str()
-                    .ok_or(anyhow!("Failed to get inner string"))?;
+                    .ok_or_else(|| anyhow!("Failed to get inner string"))?;
                 let code = UserCode::new(input);
                 Ok(code.respond())
             },
@@ -285,8 +360,7 @@ impl EventHandler for Bot {
                                 option
                                     .name(CMD_DEL_IDX)
                                     .description(
-                                        "Index of expression to delete (last \
-                                         one starts at index 0)",
+                                        "Index of line to delete (last one starts at index 0)",
                                     )
                                     .kind(CommandOptionType::Integer)
                                     .required(false)
@@ -355,6 +429,7 @@ impl EventHandler for Bot {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         if let Interaction::ApplicationCommand(command) = interaction {
             let response_content = match command.data.name.as_str() {
@@ -372,7 +447,7 @@ impl EventHandler for Bot {
                     }
                 },
                 CMD_SESSION => {
-                    self.create_session_thread(
+                    self.cmd_create_session_thread(
                         &ctx,
                         command.channel_id,
                         command.user.id,
@@ -381,120 +456,72 @@ impl EventHandler for Bot {
                 },
                 CMD_DEL => {
                     let thread_id = command.channel_id;
-                    let run_op = self.run_session_update(
-                        thread_id,
-                        command.user.id,
-                        |session| {
-                            let default = CommandDataOptionValue::Integer(0);
-                            let del_idx = command
-                                .data
-                                .options
-                                .iter()
-                                .find(|opt| opt.name == CMD_DEL_IDX)
-                                .map_or(default.clone(), |opt| {
-                                    // Get the option's inner value.
-                                    opt.resolved.clone().unwrap_or(default)
-                                });
-                            if let CommandDataOptionValue::Integer(idx) =
-                                del_idx
-                            {
-                                match session.source_code.del(idx) {
-                                    Some(deleted) => {
-                                        Ok(format!("Deleted `{}`", deleted))
-                                    },
-                                    None => Ok("Nothing to delete".to_owned()),
-                                }
-                            } else {
-                                Ok("This commands requires and integer to \
-                                    function."
-                                    .to_owned())
-                            }
-                        },
-                        |thread_id, new_session| {
-                            self.update_session_code(
-                                thread_id,
-                                new_session.source_code,
-                            )
-                        },
-                    );
+                    let user_id = command.user.id;
+                    let get_del_idx = || -> anyhow::Result<i64> {
+                        let default = CommandDataOptionValue::Integer(0);
+                        let idx = command
+                            .data
+                            .options
+                            .iter()
+                            .find(|opt| opt.name == CMD_DEL_IDX)
+                            .map_or(&default, |opt| {
+                                // Get the option's inner value.
+                                opt.resolved.as_ref().unwrap_or(&default)
+                            });
+                        let CommandDataOptionValue::Integer(idx) = idx else {
+                            return Err(anyhow!("Wrong command data option value type"));
+                        };
+                        Ok(*idx)
+                    };
 
-                    match run_op.await {
-                        Ok(msg) => msg,
-                        Err(op_err) => match op_err {
-                            OpError::Callback(_) => {
-                                INVALID_REQUEST_MSG.to_owned()
-                            },
-                            OpError::NotFound(_) => "You can't deleting \
-                                                     things outside of a \
-                                                     session thread."
-                                .to_owned(),
-                            OpError::Update(_) => {
-                                "Failed to execute deletion".to_owned()
-                            },
-                            OpError::NotAllowed => format!(
-                                "Hey {}! You are not allowed \
-                                                    to delete stuff here.",
-                                command.user.id.mention()
-                            )
-                            .to_owned(),
+                    match get_del_idx() {
+                        Err(err) => {
+                            error!(
+                                "Failed to get `/del` command argument: {err}"
+                            );
+                            "You must specify which line to delete".to_owned()
+                        },
+                        Ok(idx) => {
+                            self.cmd_del_from_session(thread_id, user_id, idx)
+                                .await
                         },
                     }
                 },
                 CMD_COLLAB => {
                     let thread_id = command.channel_id;
-                    let run_op = self.run_session_update(
-                        thread_id,
-                        command.user.id,
-                        |session| {
-                            let other = command
-                                .data
-                                .options
-                                .iter()
-                                .find(|opt| opt.name == CMD_COLLAB_WHO)
-                                .cloned();
-                            let other = other
-                                .ok_or(anyhow!("No user other specified"))?
-                                .resolved
-                                .ok_or(anyhow!("No resolved user"))?;
-                            if let CommandDataOptionValue::User(user, _) = other
-                            {
-                                session.user_ids.push(user.id);
-                                Ok(format!(
-                                    "{} is now part of this session",
-                                    user.id.mention()
-                                ))
-                            } else {
-                                Ok("This command requires a user to function."
-                                    .to_owned())
-                            }
+                    let user_id = command.user.id;
+                    let get_invited_id = || -> anyhow::Result<UserId> {
+                        let other = command
+                            .data
+                            .options
+                            .iter()
+                            .find(|opt| opt.name == CMD_COLLAB_WHO);
+                        let other = other
+                            .ok_or_else(|| {
+                                anyhow!("Missing command data option")
+                            })?
+                            .resolved
+                            .as_ref()
+                            .ok_or_else(|| anyhow!("Missing resolved value"))?;
+                        let CommandDataOptionValue::User(user, _) = other else {
+                            return Err(anyhow!("Wrong command data option value type"));
+                        };
+                        Ok(user.id)
+                    };
+
+                    match get_invited_id() {
+                        Err(err) => {
+                            error!(
+                                "Failed to get `/collab` command argument: {err}"
+                            );
+                            "You must specify who to add to this session"
+                                .to_owned()
                         },
-                        |thread_id, new_session| {
-                            self.update_session_users(
-                                thread_id,
-                                new_session.user_ids,
+                        Ok(invited_id) => {
+                            self.cmd_invite_collaborator(
+                                thread_id, user_id, invited_id,
                             )
-                        },
-                    );
-                    match run_op.await {
-                        Ok(msg) => msg,
-                        Err(op_err) => match op_err {
-                            OpError::Callback(_) => {
-                                INVALID_REQUEST_MSG.to_owned()
-                            },
-                            OpError::NotFound(_) => {
-                                "You can't collaborate outside of a session."
-                                    .to_owned()
-                            },
-                            OpError::Update(_) => {
-                                "Failed to create invite".to_owned()
-                            },
-                            OpError::NotAllowed => format!(
-                                "Hey {}! This is not your own \
-                                                    session, you can't invite \
-                                                    people.",
-                                command.user.id.mention()
-                            )
-                            .to_owned(),
+                            .await
                         },
                     }
                 },
@@ -548,11 +575,10 @@ use std::future::Future;
 use anyhow::anyhow;
 use names::{Generator, Name};
 use serenity::async_trait;
+use serenity::client::{Context, EventHandler};
 use serenity::model::application::command::CommandOptionType;
-#[rustfmt::skip]
-use serenity::model::prelude::interaction::application_command::{
-    CommandDataOption,
-    CommandDataOptionValue,
+use serenity::model::application::interaction::application_command::{
+    CommandDataOption, CommandDataOptionValue,
 };
 use serenity::model::application::interaction::{
     Interaction, InteractionResponseType,
@@ -560,8 +586,7 @@ use serenity::model::application::interaction::{
 use serenity::model::channel::{Message, MessageType};
 use serenity::model::gateway::Ready;
 use serenity::model::id::{ChannelId, GuildId, UserId};
-use serenity::prelude::*;
-use shuttle_runtime::CustomError;
+use serenity::model::mention::Mentionable;
 use sqlx::PgPool;
 use tracing::{error, info};
 
