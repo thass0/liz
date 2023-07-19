@@ -32,6 +32,12 @@ async fn serenity(
     let intents =
         GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
 
+    // Migrate the database.
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .context("Failed to migrate database".to_owned())?;
+
     let bot = match Bot::new(pool, guild_id) {
         Ok(bot) => bot,
         Err(e) => {
@@ -46,7 +52,7 @@ async fn serenity(
     Ok(client.into())
 }
 
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use serenity::model::id::GuildId;
 use serenity::prelude::*;
 use shuttle_secrets::SecretStore;

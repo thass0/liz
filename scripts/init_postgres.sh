@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+# Setup a local postgres development instance.
+
 set -x
 set -eo pipefail
 
