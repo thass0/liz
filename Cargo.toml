@@ -13,7 +13,7 @@ tokio = "1.26.0"
 tracing = "0.1.37"
 rust_lisp = "0.18.0"
 shuttle-shared-db = { version = "0.21.0", features = ["postgres"] }
-sqlx = { version = "0.6.2", features = ["runtime-tokio-native-tls", "postgres"] }
+sqlx = { version = "0.6.2", features = ["runtime-tokio-native-tls", "postgres", "offline"] }
 serde = "1.0.171"
 names = { version = "0.14.0", default-features = false }
 thiserror = "1.0.43"
