@@ -155,8 +155,8 @@ pub trait DiscordCode: AsRef<str> {
 impl<T> DiscordCode for T where T: AsRef<str> {}
 
 struct LisbEnv {
-    env: Rc<RefCell<Env>>,
-    print_buf: Rc<RefCell<String>>,
+    env:         Rc<RefCell<Env>>,
+    print_buf:   Rc<RefCell<String>>,
     expressions: Vec<LisbExpression>,
 }
 
@@ -257,8 +257,8 @@ impl Truncate for String {
 }
 
 struct LisbExpression {
-    sexpr: Value,
-    result: Result<Value, RuntimeError>,
+    sexpr:   Value,
+    result:  Result<Value, RuntimeError>,
     printed: String,
 }
 

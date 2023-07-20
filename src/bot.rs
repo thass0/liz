@@ -1,5 +1,5 @@
 pub struct Bot {
-    db: PgPool,
+    db:       PgPool,
     guild_id: GuildId,
 }
 
@@ -9,7 +9,7 @@ impl Bot {
     }
 
     #[tracing::instrument(name = "Store new session", skip(self), err)]
-    async fn store_session(
+    async fn create_session(
         &self,
         thread_id: ChannelId,
         user_id: UserId,
@@ -26,6 +26,42 @@ impl Bot {
         .execute(&self.db)
         .await?;
         Ok(())
+    }
+
+    #[tracing::instrument(name = "Get session by thread ID", skip(self))]
+    async fn get_session(
+        &self,
+        thread_id: ChannelId,
+    ) -> Result<UserSession, anyhow::Error> {
+        struct UserSessionStrings {
+            user_ids:    Vec<String>,
+            source_code: String,
+        }
+        let session = sqlx::query_as!(
+            UserSessionStrings,
+            r#"
+            SELECT user_ids, source_code
+            FROM sessions
+            WHERE
+                thread_id = $1
+            "#,
+            thread_id.to_string()
+        )
+        .fetch_one(&self.db)
+        .await?;
+
+        Ok(UserSession::new(
+            session
+                .user_ids
+                .iter()
+                .map(|id| {
+                    id.parse::<u64>()
+                        .map(UserId::from)
+                        .expect("Invalid data in db")
+                })
+                .collect::<Vec<UserId>>(),
+            session.source_code,
+        ))
     }
 
     #[tracing::instrument(name = "Update session code", skip(self), err)]
@@ -75,6 +111,10 @@ impl Bot {
         Ok(())
     }
 
+    /// Run any update operation on a session by its thread
+    /// ID. Use `update_user_ids` or
+    /// `update_source_code` if only one of the two is
+    /// supposed to change.
     #[tracing::instrument(
         name = "Run an updating operation the a session",
         skip(self, transform, update),
@@ -99,8 +139,7 @@ impl Bot {
                         Ok(()) => Ok(msg),
                         Err(e) => {
                             error!(
-                                "Session update failed {}, callback \
-                                     message {}",
+                                "Session update failed {}, callback message {}",
                                 e, msg
                             );
                             Err(OpError::Update(e))
@@ -119,45 +158,52 @@ impl Bot {
         }
     }
 
+    /// Wrap `run_session_update` to update the user IDs.
+    async fn update_user_ids<S>(
+        &self,
+        thread_id: ChannelId,
+        caller: UserId,
+        transform: S,
+    ) -> Result<String, OpError>
+    where
+        S: FnOnce(&mut Vec<UserId>) -> Result<String, anyhow::Error> + Send,
+    {
+        self.run_session_update(
+            thread_id,
+            caller,
+            |session| transform(&mut session.user_ids),
+            |thread_id, updated_session| {
+                self.update_session_users(thread_id, updated_session.user_ids)
+            },
+        )
+        .await
+    }
+
+    // Wrap `run_session_update` to update the session code.
+    async fn update_source_code<S>(
+        &self,
+        thread_id: ChannelId,
+        caller: UserId,
+        transform: S,
+    ) -> Result<String, OpError>
+    where
+        S: FnOnce(&mut UserCode) -> Result<String, anyhow::Error> + Send,
+    {
+        self.run_session_update(
+            thread_id,
+            caller,
+            |session| transform(&mut session.source_code),
+            |thread_id, updated_session| {
+                self.update_session_code(thread_id, updated_session.source_code)
+            },
+        )
+        .await
+    }
+
     // NOTE: Thread ID and channel ID may be used
     // interchangeably.
 
-    #[tracing::instrument(name = "Get session by thread ID", skip(self))]
-    async fn get_session(
-        &self,
-        thread_id: ChannelId,
-    ) -> Result<UserSession, anyhow::Error> {
-        struct UserSessionStrings {
-            user_ids: Vec<String>,
-            source_code: String,
-        }
-        let session = sqlx::query_as!(
-            UserSessionStrings,
-            r#"
-            SELECT user_ids, source_code
-            FROM sessions
-            WHERE
-                thread_id = $1
-            "#,
-            thread_id.to_string()
-        )
-        .fetch_one(&self.db)
-        .await?;
-
-        Ok(UserSession::new(
-            session
-                .user_ids
-                .iter()
-                .map(|id| {
-                    id.parse::<u64>()
-                        .map(UserId::from)
-                        .expect("Invalid data in db")
-                })
-                .collect::<Vec<UserId>>(),
-            session.source_code,
-        ))
-    }
-
+    /// Execute the `/lisp` command, creating a new session.
     async fn cmd_create_session_thread(
         &self,
         ctx: &Context,
@@ -199,7 +245,7 @@ impl Bot {
             return rollback_thread_creation().await;
         }
 
-        let store = self.store_session(thread.id, user_id);
+        let store = self.create_session(thread.id, user_id);
         match store.await {
             Err(err) => {
                 error!("Failed to store session: {}", err);
@@ -209,62 +255,51 @@ impl Bot {
         }
     }
 
+    /// Execute the `/del` command.
     async fn cmd_del_from_session(
         &self,
         thread_id: ChannelId,
         user_id: UserId,
         idx: i64,
     ) -> String {
-        let run_op = self.run_session_update(
-            thread_id,
-            user_id,
-            |session| match session.source_code.del(idx) {
-                Some(deleted) => Ok(format!("Deleted `{deleted}`")),
-                None => Ok("Nothing to delete".to_owned()),
-            },
-            |thread_id, new_session| {
-                self.update_session_code(thread_id, new_session.source_code)
-            },
-        );
+        let run_op =
+            self.update_source_code(thread_id, user_id, |source_code| {
+                match source_code.del(idx) {
+                    Some(deleted) => Ok(format!("Deleted `{deleted}`")),
+                    None => Ok("Nothing to delete".to_owned()),
+                }
+            });
 
         match run_op.await {
             Ok(msg) => msg,
             Err(op_err) => match op_err {
                 OpError::Callback(_) => INVALID_REQUEST_MSG.to_owned(),
-                OpError::NotFound(_) => "You can't deleting \
-                                         things outside of a \
-                                         session thread."
+                OpError::NotFound(_) => "You can't deleting things outside of \
+                                         a session thread."
                     .to_owned(),
                 OpError::Update(_) => "Failed to execute deletion".to_owned(),
                 OpError::NotAllowed => format!(
-                    "Hey {}! You are not allowed \
-                                        to delete stuff here.",
+                    "Hey {}! You are not allowed to delete stuff here.",
                     user_id.mention()
                 ),
             },
         }
     }
 
+    /// Execute the `/collab` command.
     async fn cmd_invite_collaborator(
         &self,
         thread_id: ChannelId,
         user_id: UserId,
         invited_id: UserId,
     ) -> String {
-        let run_op = self.run_session_update(
-            thread_id,
-            user_id,
-            |session| {
-                session.user_ids.push(invited_id);
-                Ok(format!(
-                    "{} is now part of this session",
-                    invited_id.mention()
-                ))
-            },
-            |thread_id, new_session| {
-                self.update_session_users(thread_id, new_session.user_ids)
-            },
-        );
+        let run_op = self.update_user_ids(thread_id, user_id, |user_ids| {
+            user_ids.push(invited_id);
+            Ok(format!(
+                "{} is now part of this session",
+                invited_id.mention()
+            ))
+        });
 
         match run_op.await {
             Ok(msg) => msg,
@@ -275,35 +310,28 @@ impl Bot {
                 },
                 OpError::Update(_) => "Failed to create invite".to_owned(),
                 OpError::NotAllowed => format!(
-                    "Hey {}! This is not your own \
-                    session, you can't invite \
-                    people.",
+                    "Hey {}! This is not your own session, you can't invite \
+                     people.",
                     user_id.mention()
                 ),
             },
         }
     }
 
-    async fn eval_user_input(
+    /// Execute the `/eval` command.
+    async fn cmd_eval(
         &self,
         orig_channel: ChannelId,
-        options: &[CommandDataOption],
+        sexpr: Option<&str>,
     ) -> anyhow::Result<String> {
         match self.get_session(orig_channel).await {
             Err(_) => {
-                // There is no session for this thread, so `/eval`
-                // will try to execute the  given code.
-                let option = options
-                    .iter()
-                    .find(|opt| opt.name == CMD_EVAL_SEXPR)
-                    .cloned()
-                    .ok_or_else(|| anyhow!("Failed to find correct option"))?
-                    .value
-                    .ok_or_else(|| anyhow!("Missing option content"))?;
-                let input = option
-                    .as_str()
-                    .ok_or_else(|| anyhow!("Failed to get inner string"))?;
-                let code = UserCode::new(input);
+                let Some(sexpr) = sexpr else {
+                    return Err(anyhow!(
+                        "Failed to get session to provide required input"
+                    ));
+                };
+                let code = UserCode::new(sexpr);
                 Ok(code.respond())
             },
             Ok(session) => Ok(session.source_code.respond()),
@@ -360,7 +388,8 @@ impl EventHandler for Bot {
                                 option
                                     .name(CMD_DEL_IDX)
                                     .description(
-                                        "Index of line to delete (last one starts at index 0)",
+                                        "Index of line to delete (last one \
+                                         starts at index 0)",
                                     )
                                     .kind(CommandOptionType::Integer)
                                     .required(false)
@@ -370,7 +399,8 @@ impl EventHandler for Bot {
                         command
                             .name(CMD_COLLAB)
                             .description(
-                                "Invite someone to collaborate on a session with you",
+                                "Invite someone to collaborate on a session \
+                                 with you",
                             )
                             .create_option(|option| {
                                 option
@@ -391,15 +421,12 @@ impl EventHandler for Bot {
     async fn message(&self, ctx: Context, msg: Message) {
         if msg.kind == MessageType::Regular && !msg.author.bot {
             let thread_id = msg.channel_id;
-            let run_op = self.run_session_update(
+            let run_op = self.update_source_code(
                 thread_id,
                 msg.author.id,
-                |session| {
-                    session.source_code.append(&msg.content);
-                    Ok(session.source_code.respond())
-                },
-                |thread_id, new_session| {
-                    self.update_session_code(thread_id, new_session.source_code)
+                |source_code| {
+                    source_code.append(&msg.content);
+                    Ok(source_code.respond())
                 },
             );
 
@@ -434,14 +461,38 @@ impl EventHandler for Bot {
         if let Interaction::ApplicationCommand(command) = interaction {
             let response_content = match command.data.name.as_str() {
                 CMD_EVAL => {
-                    let options = &command.data.options;
-                    let eval_input =
-                        self.eval_user_input(command.channel_id, options);
+                    let get_optional_sexpr = || -> anyhow::Result<&str> {
+                        let option = command
+                            .data
+                            .options
+                            .iter()
+                            .find(|opt| opt.name == CMD_EVAL_SEXPR)
+                            .as_ref()
+                            .ok_or_else(|| {
+                                anyhow!("Failed to find correct option")
+                            })?
+                            .value
+                            .as_ref()
+                            .ok_or_else(|| anyhow!("Missing option content"))?;
+                        let input = option.as_str().ok_or_else(|| {
+                            anyhow!("Failed to get inner string")
+                        })?;
+
+                        Ok(input)
+                    };
+
+                    let eval_input = self.cmd_eval(
+                        command.channel_id,
+                        get_optional_sexpr().ok(),
+                    );
                     match eval_input.await {
                         Err(err) => {
                             error!("Failed to evaluate user input: {}", err);
-                            format!("I need input outside of a session (looking at you {})",
-                            command.user.id.mention())
+                            format!(
+                                "I need input outside of a session (looking \
+                                 at you {})",
+                                command.user.id.mention()
+                            )
                         },
                         Ok(response) => response,
                     }
@@ -469,7 +520,9 @@ impl EventHandler for Bot {
                                 opt.resolved.as_ref().unwrap_or(&default)
                             });
                         let CommandDataOptionValue::Integer(idx) = idx else {
-                            return Err(anyhow!("Wrong command data option value type"));
+                            return Err(anyhow!(
+                                "Wrong command data option value type"
+                            ));
                         };
                         Ok(*idx)
                     };
@@ -503,8 +556,11 @@ impl EventHandler for Bot {
                             .resolved
                             .as_ref()
                             .ok_or_else(|| anyhow!("Missing resolved value"))?;
-                        let CommandDataOptionValue::User(user, _) = other else {
-                            return Err(anyhow!("Wrong command data option value type"));
+                        let CommandDataOptionValue::User(user, _) = other
+                        else {
+                            return Err(anyhow!(
+                                "Wrong command data option value type"
+                            ));
                         };
                         Ok(user.id)
                     };
@@ -512,7 +568,8 @@ impl EventHandler for Bot {
                     match get_invited_id() {
                         Err(err) => {
                             error!(
-                                "Failed to get `/collab` command argument: {err}"
+                                "Failed to get `/collab` command argument: \
+                                 {err}"
                             );
                             "You must specify who to add to this session"
                                 .to_owned()
@@ -546,7 +603,7 @@ impl EventHandler for Bot {
 
 #[derive(Debug)]
 struct UserSession {
-    user_ids: Vec<UserId>,
+    user_ids:    Vec<UserId>,
     source_code: UserCode,
 }
 
@@ -577,11 +634,11 @@ use names::{Generator, Name};
 use serenity::async_trait;
 use serenity::client::{Context, EventHandler};
 use serenity::model::application::command::CommandOptionType;
-use serenity::model::application::interaction::application_command::{
-    CommandDataOption, CommandDataOptionValue,
-};
+#[rustfmt::skip]
+use serenity::model::application::interaction::application_command::CommandDataOptionValue;
 use serenity::model::application::interaction::{
-    Interaction, InteractionResponseType,
+    Interaction,
+    InteractionResponseType,
 };
 use serenity::model::channel::{Message, MessageType};
 use serenity::model::gateway::Ready;
