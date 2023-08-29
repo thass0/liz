@@ -92,7 +92,7 @@ impl UserCode {
     }
 
     fn eval(&self) -> String {
-        let mut env = LisbEnv::new();
+        let mut env = LizEnv::new();
         for sexpr in parse(&self.0).flatten() {
             env.eval(sexpr);
         }
@@ -154,13 +154,13 @@ pub trait DiscordCode: AsRef<str> {
 
 impl<T> DiscordCode for T where T: AsRef<str> {}
 
-struct LisbEnv {
+struct LizEnv {
     env:         Rc<RefCell<Env>>,
     print_buf:   Rc<RefCell<String>>,
-    expressions: Vec<LisbExpression>,
+    expressions: Vec<LizExpression>,
 }
 
-impl LisbEnv {
+impl LizEnv {
     fn new() -> Self {
         let mut env = default_env();
 
@@ -196,7 +196,7 @@ impl LisbEnv {
 
     fn eval(&mut self, sexpr: Value) {
         let eval_res = interpreter::eval(self.env.clone(), &sexpr);
-        self.expressions.push(LisbExpression {
+        self.expressions.push(LizExpression {
             sexpr,
             result: eval_res,
             printed: self.print_buf.borrow().clone(),
@@ -205,9 +205,9 @@ impl LisbEnv {
     }
 }
 
-impl std::fmt::Display for LisbEnv {
+impl std::fmt::Display for LizEnv {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        for LisbExpression {
+        for LizExpression {
             sexpr,
             result,
             printed,
@@ -256,7 +256,7 @@ impl Truncate for String {
     }
 }
 
-struct LisbExpression {
+struct LizExpression {
     sexpr:   Value,
     result:  Result<Value, RuntimeError>,
     printed: String,
