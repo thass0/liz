@@ -2,7 +2,7 @@
 
 ![Computing Fibonacci numbers using Liz](.assets/liz-fib.png)
 
-Liz is a Discord bot that provides you with a basic Lisp REPL with collaborative editing capabilities. It's run using [Serenity](https://github.com/serenity-rs/serenity) and [Shuttle](https://github.com/shuttle-hq/shuttle), which means you can easily host get your own instance up and running in a minute.
+Liz is a Discord bot that provides you with a basic Lisp REPL with collaborative editing capabilities. It's run using [Serenity](https://github.com/serenity-rs/serenity) and [Shuttle](https://github.com/shuttle-hq/shuttle), which means you can easily get your own instance up and running in a minute.
 
 ## 🦾Commands
 
@@ -17,7 +17,7 @@ Liz is a Discord bot that provides you with a basic Lisp REPL with collaborative
 
 In a Lisp session, any message you write is interpreted as code. This means that if you want to write a 'normal' message, you need to make it a comment by starting it with `;;`. If you want, you can use single back-tics so that your text is rendered using a mono space font. You can also enclose the code you write in triple back-tics, and you're allowed to specify `lisp` as the language that's used.
 
-## 🪂 Deployment
+## 🚀 Deployment
 
 > The following deployment strategy will work if you didn't make any changes to the code in this repository. If you did, please refer to the development section to make sure that your deployment compiles.
 
