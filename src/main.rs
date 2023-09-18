@@ -7,9 +7,11 @@ async fn serenity(
     pool: PgPool,
 ) -> shuttle_serenity::ShuttleSerenity {
     #[cfg(debug_assertions)]
-    info!("Building in debug mode. Using GUILD_ID");
+    info!(
+        "Building in debug mode. Using DISCORD_GUILDID and DISCORD_DEVEL_TOKEN"
+    );
     #[cfg(not(debug_assertions))]
-    info!("Building in release mode. Using_global commands");
+    info!("Building in release mode. Using DISCORD_TOKEN");
 
     #[cfg(debug_assertions)]
     let (api_token, guild_id) = get_secrets(&secret_store)?;
