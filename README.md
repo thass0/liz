@@ -1,4 +1,4 @@
-# Liz -- Lisp on Discord
+# Liz: collaborative Lisp coding on Discord
 
 ![Computing Fibonacci numbers using Liz](.assets/liz-fib.png)
 
