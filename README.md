@@ -4,6 +4,8 @@
 
 Liz is a Discord bot that provides you with a basic Lisp REPL with collaborative editing capabilities. It's run using [Serenity](https://github.com/serenity-rs/serenity) and [Shuttle](https://github.com/shuttle-hq/shuttle), which means you can easily get your own instance up and running in a minute.
 
+You can try Liz right now, on the [Liz Playground](https://discord.gg/bdM34npb) Discord server or by [adding Liz to a server](https://discord.com/api/oauth2/authorize?client_id=1128674616483778661&permissions=534723950656&scope=bot) of your own.
+
 ## 🦾Commands
 
 * `/eval` takes a single S-expression as input and evaluates it in a fresh environment. Alternatively, when used inside an active session, this command evaluates all the code in that session.
@@ -23,7 +25,7 @@ In a Lisp session, any message you write is interpreted as code. This means that
 
 Liz is built using Shuttle. To deploy it, you need to have [`cargo-shuttle` set up correctly](https://docs.shuttle.rs/getting-started/installation).
 
-Deploying on Shuttle is super easy. First, you have to set up a new bot application on Discord and generate a token for it. My instance uses the following permission integer, which allows Liz to use most text chat capabilities: `534723946560`.
+Deploying on Shuttle is super easy. First, you have to set up a new bot application on Discord and generate a token for it (remember to set the right permissions). My instance uses the following permission integer, which allows Liz to use most text chat capabilities: `534723946560`.
 
 Once you have your token, store it in a file in this repository's root called `Secrets.toml`:
 
