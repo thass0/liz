@@ -1,11 +1,18 @@
 pub struct Bot {
     db:       PgPool,
+    #[cfg(debug_assertions)]
     guild_id: GuildId,
 }
 
 impl Bot {
+    #[cfg(debug_assertions)]
     pub const fn new(db: PgPool, guild_id: GuildId) -> Self {
         Self { db, guild_id }
+    }
+
+    #[cfg(not(debug_assertions))]
+    pub const fn new(db: PgPool) -> Self {
+        Self { db }
     }
 
     #[tracing::instrument(name = "Store new session", skip(self), err)]
@@ -274,8 +281,8 @@ impl Bot {
             Ok(msg) => msg,
             Err(op_err) => match op_err {
                 OpError::Callback(_) => INVALID_REQUEST_MSG.to_owned(),
-                OpError::NotFound(_) => "You can't deleting things outside of \
-                                         a session thread."
+                OpError::NotFound(_) => "You can't deleting things outside a \
+                                         session thread."
                     .to_owned(),
                 OpError::Update(_) => "Failed to execute deletion".to_owned(),
                 OpError::NotAllowed => format!(
@@ -354,65 +361,78 @@ enum OpError {
 #[async_trait]
 impl EventHandler for Bot {
     async fn ready(&self, ctx: Context, ready: Ready) {
+        fn create_app_commands(
+            commands: &mut CreateApplicationCommands,
+        ) -> &mut CreateApplicationCommands {
+            commands
+                .create_application_command(|command| {
+                    command
+                        .name(CMD_EVAL)
+                        .description("Evaluate Lisp code")
+                        .create_option(|option| {
+                            option
+                                .name(CMD_EVAL_SEXPR)
+                                .description("S-expression to evaluate")
+                                .kind(CommandOptionType::String)
+                                .required(false)
+                        })
+                })
+                .create_application_command(|command| {
+                    command
+                        .name(CMD_SESSION)
+                        .description("Start a Lisp coding session")
+                })
+                .create_application_command(|command| {
+                    command
+                        .name(CMD_DEL)
+                        .description("Delete an S-expression in this session")
+                        .create_option(|option| {
+                            option
+                                .name(CMD_DEL_IDX)
+                                .description(
+                                    "Index of line to delete (last one starts \
+                                     at index 0)",
+                                )
+                                .kind(CommandOptionType::Integer)
+                                .required(false)
+                        })
+                })
+                .create_application_command(|command| {
+                    command
+                        .name(CMD_COLLAB)
+                        .description(
+                            "Invite someone to collaborate on a session with \
+                             you",
+                        )
+                        .create_option(|option| {
+                            option
+                                .name(CMD_COLLAB_WHO)
+                                .description(
+                                    "The person or role you want to invite",
+                                )
+                                .kind(CommandOptionType::Mentionable)
+                                .required(true)
+                        })
+                })
+        }
+
         info!("{} is connected!", ready.user.name);
 
+        // Create global commands when in release build.
+        #[cfg(not(debug_assertions))]
+        Command::set_global_application_commands(
+            &ctx.http,
+            create_app_commands,
+        )
+        .await
+        .unwrap();
+
+        // Create guild specific commands when in debug build.
+        #[cfg(debug_assertions)]
         GuildId::set_application_commands(
             &self.guild_id,
             &ctx.http,
-            |commands| {
-                commands
-                    .create_application_command(|command| {
-                        command
-                            .name(CMD_EVAL)
-                            .description("Evaluate Lisp code")
-                            .create_option(|option| {
-                                option
-                                    .name(CMD_EVAL_SEXPR)
-                                    .description("S-expression to evaluate")
-                                    .kind(CommandOptionType::String)
-                                    .required(false)
-                            })
-                    })
-                    .create_application_command(|command| {
-                        command
-                            .name(CMD_SESSION)
-                            .description("Start a Lisp coding session")
-                    })
-                    .create_application_command(|command| {
-                        command
-                            .name(CMD_DEL)
-                            .description(
-                                "Delete an S-expression in this session",
-                            )
-                            .create_option(|option| {
-                                option
-                                    .name(CMD_DEL_IDX)
-                                    .description(
-                                        "Index of line to delete (last one \
-                                         starts at index 0)",
-                                    )
-                                    .kind(CommandOptionType::Integer)
-                                    .required(false)
-                            })
-                    })
-                    .create_application_command(|command| {
-                        command
-                            .name(CMD_COLLAB)
-                            .description(
-                                "Invite someone to collaborate on a session \
-                                 with you",
-                            )
-                            .create_option(|option| {
-                                option
-                                    .name(CMD_COLLAB_WHO)
-                                    .description(
-                                        "The person or role you want to invite",
-                                    )
-                                    .kind(CommandOptionType::Mentionable)
-                                    .required(true)
-                            })
-                    })
-            },
+            create_app_commands,
         )
         .await
         .unwrap();
@@ -633,16 +653,21 @@ use anyhow::anyhow;
 use names::{Generator, Name};
 use serenity::async_trait;
 use serenity::client::{Context, EventHandler};
+#[cfg(not(debug_assertions))]
+use serenity::model::application::command::Command;
 use serenity::model::application::command::CommandOptionType;
 #[rustfmt::skip]
 use serenity::model::application::interaction::application_command::CommandDataOptionValue;
+use serenity::builder::CreateApplicationCommands;
 use serenity::model::application::interaction::{
     Interaction,
     InteractionResponseType,
 };
 use serenity::model::channel::{Message, MessageType};
 use serenity::model::gateway::Ready;
-use serenity::model::id::{ChannelId, GuildId, UserId};
+#[cfg(debug_assertions)]
+use serenity::model::id::GuildId;
+use serenity::model::id::{ChannelId, UserId};
 use serenity::model::mention::Mentionable;
 use sqlx::PgPool;
 use tracing::{error, info};

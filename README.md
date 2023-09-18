@@ -23,23 +23,32 @@ In a Lisp session, any message you write is interpreted as code. This means that
 
 Liz is built using Shuttle. To deploy it, you need to have [`cargo-shuttle` set up correctly](https://docs.shuttle.rs/getting-started/installation).
 
-Deploying on Shuttle is super easy. First, you have to set up a new bot application on Discord and generate a token for it. My instance uses the following permission integer, which allows Liz to use most text chat capabilities: `534723946560`. Additionally, you need the guild (server) ID of the server that you intend to use Liz on.
+Deploying on Shuttle is super easy. First, you have to set up a new bot application on Discord and generate a token for it. My instance uses the following permission integer, which allows Liz to use most text chat capabilities: `534723946560`.
 
-Once you have both of them, store them in a file in this repository's root called `Secrets.toml`:
+Once you have your token, store it in a file in this repository's root called `Secrets.toml`:
 
 ``` toml
 DISCORD_TOKEN = 'Your Discord token'
-DISCORD_GUILDID = 'Your guild ID'
 ```
 
-Be careful to not leak your application token. For example, don't check `Secrets.toml` into source control.
+Be careful to not leak your application token. For example, don't check `Secrets.toml` into source control (this repository ignores it by default, don't worry).
 
-Now, run the following two commands in this repository's root.
+Now, run the following two commands in this repository's root. You need to replace `my-liz` with some project name of your own.
 
 ``` sh
-cargo shuttle project start
-cargo shuttle deploy
+cargo shuttle project start --name my-liz
+cargo shuttle deploy --name my-liz
 ```
+
+Project names are unique on Shuttle. That's why you need to choose your own. Instead of using the `--name` flag with each command, you can also change the name of the project in `Cargo.toml`:
+
+``` toml
+[package]
+name = "my-liz"
+# ...
+```
+
+For a Discord bot like this, you should also consider setting `idle-minutes` to `0`. You can read about what this does for your [here](https://docs.shuttle.rs/getting-started/idle-projects).
 
 ## 🛠️ Development
 
@@ -54,7 +63,28 @@ chmod +x scripts/init_postgres.sh
 ./scripts/init_postgres.sh
 ```
 
-Lastly, compile and run Liz using `cargo shuttle run`.
+Liz has two different modes of operations: one for release build where all application commands are set globally for your bot and one for development purposes which is limited in scope to a single server.
+
+When running your bot locally with `cargo shuttle run`, the development (debug) build is used. To use the global build, you can pass the `--release` flag: `cargo shuttle run --release`. `cargo shuttle deploy` always uses the latter option.
+
+
+ Additionally, you need the guild (server) ID of the server that you intend to use Liz on.
+
+It is recommended that you use the single-server development mode, until you deploy your final changes. This mode requires you do add two more entries to your `Secrets.toml` file:
+
+1. The guild (server) ID of the server than you want to test Liz on (`DISCORD_DEVEL_TOKEN`).
+2. Another Discord application token (`DISCORD_GUILDID`).
+
+Again, you can get this token by create a new bot application on Discord. You will only be able to use this development bot application on the serve whose guild ID you put in your `Secrets.toml`. Lastly, compile and run Liz using `cargo shuttle run`. The purpose of this division is that you can safely develop your bot, while other people use your running instance.
+
+A full `Secrets.toml` file for development should look like this:
+
+``` toml
+DISCORD_TOKEN = 'The token for your main application. This is quite a long string'
+POSTGRES_PASSWORD = 'password'
+DISCORD_GUILDID = 'The guild ID of the server you want to test your bot on.'
+DISCORD_DEVEL_TOKEN = 'The token of the bot used for development. This bot can only be used on the server with the guild ID above.'
+```
 
 If you have any issues, feel free to [reach out](mailto:d4kd@proton.me) or [open an issue](https://github.com/d4ckard/liz/issues/new).
 
