@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE sessions\n            SET\n                user_ids = $2\n            WHERE\n                thread_id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6db2b64302bb0b8e6e05277873f818069a34ca948932b94a674efc5d9748ebcf"
+}

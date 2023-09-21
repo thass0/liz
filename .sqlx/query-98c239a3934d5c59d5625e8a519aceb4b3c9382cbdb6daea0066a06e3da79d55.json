@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT user_ids, source_code\n            FROM sessions\n            WHERE\n                thread_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_ids",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 1,
+        "name": "source_code",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "98c239a3934d5c59d5625e8a519aceb4b3c9382cbdb6daea0066a06e3da79d55"
+}
