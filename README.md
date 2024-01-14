@@ -88,7 +88,7 @@ DISCORD_GUILDID = 'The guild ID of the server you want to test your bot on.'
 DISCORD_DEVEL_TOKEN = 'The token of the bot used for development. This bot can only be used on the server with the guild ID above.'
 ```
 
-If you have any issues, feel free to [reach out](mailto:d4kd@proton.me) or [open an issue](https://github.com/d4ckard/liz/issues/new).
+If you have any issues, feel free to [reach out](mailto:thassilo.schulze@proton.me) or [open an issue](https://github.com/thass0/liz/issues/new).
 
 ### 🏗️ Building without a database
 
