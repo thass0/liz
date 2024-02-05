@@ -4,7 +4,7 @@
 
 Liz is a Discord bot that provides you with a basic Lisp REPL with collaborative editing capabilities. It's run using [Serenity](https://github.com/serenity-rs/serenity) and [Shuttle](https://github.com/shuttle-hq/shuttle), which means you can easily get your own instance up and running in a minute.
 
-You can try Liz right now, on the [Liz Playground](https://discord.gg/bdM34npb) Discord server or by [adding Liz to a server](https://discord.com/api/oauth2/authorize?client_id=1128674616483778661&permissions=534723950656&scope=bot) of your own.
+You can try Liz right now, on the [Liz Playground](https://discord.gg/paz4DCgQ) Discord server or by [adding Liz to a server](https://discord.com/api/oauth2/authorize?client_id=1128674616483778661&permissions=534723950656&scope=bot) of your own.
 
 ## 🦾Commands
 
